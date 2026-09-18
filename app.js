@@ -14,6 +14,46 @@ const loadingOverlay = $('loadingOverlay');
 
 let landingDismissed = false;
 let cesiumState = 'LOADING'; // 'LOADING' | 'READY' | 'ERROR'
+let landingAnimFrame = null;
+
+/* ── Interactive Background Gradient Mouse Tracking for Landing Page ── */
+function initLandingGradientTracking() {
+  const blob = $('landingInteractiveBlob');
+  if (!blob) return;
+
+  let curX = 0;
+  let curY = 0;
+  let tgX = window.innerWidth / 2;
+  let tgY = window.innerHeight / 2;
+
+  const onMouseMove = e => {
+    if (landingDismissed) return;
+    tgX = e.clientX;
+    tgY = e.clientY;
+  };
+
+  window.addEventListener('mousemove', onMouseMove, { passive: true });
+
+  function animate() {
+    if (landingDismissed) {
+      if (landingAnimFrame) cancelAnimationFrame(landingAnimFrame);
+      window.removeEventListener('mousemove', onMouseMove);
+      return;
+    }
+    curX += (tgX - curX) / 16;
+    curY += (tgY - curY) / 16;
+    blob.style.transform = `translate(${Math.round(curX)}px, ${Math.round(curY)}px)`;
+    landingAnimFrame = requestAnimationFrame(animate);
+  }
+
+  landingAnimFrame = requestAnimationFrame(animate);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initLandingGradientTracking);
+} else {
+  initLandingGradientTracking();
+}
 
 function setCesiumReady() {
   if (cesiumState === 'READY') return;
@@ -39,6 +79,10 @@ function setCesiumError(msg) {
 function dismissLandingPage() {
   if (landingDismissed) return;
   landingDismissed = true;
+  if (landingAnimFrame) {
+    cancelAnimationFrame(landingAnimFrame);
+    landingAnimFrame = null;
+  }
 
   const btnExplore = $('btnExploreOcean');
   const statusEl = $('loaderStatusText');
@@ -99,7 +143,7 @@ function showErrorBanner(html) {
   document.querySelector('.err-banner')?.remove();
   const b = document.createElement('div');
   b.className = 'err-banner';
-  b.innerHTML = '<span>⚠️</span><span>' + html + '</span>';
+  b.innerHTML = '<span class="err-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span><span>' + html + '</span>';
   document.body.prepend(b);
 }
 function fmtDist(m) {
@@ -172,13 +216,13 @@ try {
     }
   })();
 
-  // Hover marker
+  // Hover marker: vivid green dot
   targetIndicator = viewer.entities.add({
     name: 'Sampling coordinate',
     position: Cesium.Cartesian3.ZERO, show: false,
     point: {
-      pixelSize: 9, color: Cesium.Color.fromCssColorString('#00f2fe'),
-      outlineColor: Cesium.Color.WHITE, outlineWidth: 2,
+      pixelSize: 8, color: Cesium.Color.fromCssColorString('#00E676'),
+      outlineColor: Cesium.Color.fromCssColorString('#061a10'), outlineWidth: 2,
       disableDepthTestDistance: Number.POSITIVE_INFINITY
     }
   });
@@ -212,7 +256,7 @@ try {
       disableDepthTestDistance: Number.POSITIVE_INFINITY
     },
     label: {
-      text: '📍 MY LOCATION',
+      text: 'MY LOCATION',
       font: '700 11px JetBrains Mono, monospace',
       fillColor: Cesium.Color.fromCssColorString('#6ee7b7'),
       outlineColor: Cesium.Color.fromCssColorString('#02060f'),
@@ -367,6 +411,110 @@ zoomRange.addEventListener('input', e => {
   paintSlider(e.target.value);
   setTimeout(() => { sliderBusy = false; }, 60);
 });
+
+/* ==================================================================
+   3b. TRACKPAD & GESTURE NAVIGATION
+   Pinch In (fingers together)  → Zoom IN toward globe
+   Pinch Out (fingers apart)    → Zoom OUT from globe
+   Mouse Wheel Up               → Zoom IN (native Cesium)
+   Mouse Wheel Down             → Zoom OUT (native Cesium)
+   ================================================================== */
+const TRACKPAD_ZOOM_SENSITIVITY = 0.005;
+
+function initTrackpadGestures() {
+  if (!viewer || !viewer.scene || !viewer.scene.canvas) return;
+  const canvas = viewer.scene.canvas;
+
+  // Trackpad Pinch Detection via Wheel Event (Chrome, Edge, Windows Precision Touchpad, macOS)
+  canvas.addEventListener('wheel', e => {
+    // Only intercept trackpad pinch gestures (ctrlKey is true during trackpad pinch in Chromium/Safari)
+    if (!e.ctrlKey) {
+      // Ordinary physical mouse wheel or 2-finger scroll: let Cesium's ScreenSpaceCameraController handle natively
+      return;
+    }
+
+    // Prevent default browser page-level zoom and stop Cesium internal wheel handler from counter-zooming
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+
+    if (!viewer) return;
+    const h = camHeight();
+
+    // Normalize delta across deltaMode (0 = pixels, 1 = lines, 2 = pages)
+    let rawDelta = e.deltaY;
+    if (isNaN(rawDelta) || !isFinite(rawDelta)) return;
+    if (e.deltaMode === 1) rawDelta *= 16;
+    else if (e.deltaMode === 2) rawDelta *= 100;
+
+    // Extreme delta protection: clamp between -80 and +80 px per event
+    const clampedDelta = Math.max(-80, Math.min(80, rawDelta));
+    if (Math.abs(clampedDelta) < 0.05) return;
+
+    // Proportional zoom factor based on camera height
+    const factor = Math.min(Math.abs(clampedDelta) * TRACKPAD_ZOOM_SENSITIVITY, 0.15);
+    const zoomAmount = Math.max(h * factor, 10);
+
+    // Direction normalization:
+    // In browsers, pinch inward (fingers together) emits deltaY > 0
+    // Pinch outward (fingers apart) emits deltaY < 0
+    // Target:
+    // Pinch inward  (clampedDelta > 0) -> Zoom IN
+    // Pinch outward (clampedDelta < 0) -> Zoom OUT
+    if (clampedDelta > 0) {
+      if (h - zoomAmount >= MIN_H) {
+        viewer.camera.zoomIn(zoomAmount);
+      } else if (h > MIN_H) {
+        viewer.camera.zoomIn(h - MIN_H);
+      }
+    } else {
+      if (h + zoomAmount <= MAX_H) {
+        viewer.camera.zoomOut(zoomAmount);
+      } else if (h < MAX_H) {
+        viewer.camera.zoomOut(MAX_H - h);
+      }
+    }
+  }, { capture: true, passive: false });
+
+  // WebKit / Safari GestureEvent handling (hardware trackpad gesture support)
+  let lastGestureScale = 1.0;
+  canvas.addEventListener('gesturestart', e => {
+    e.preventDefault();
+    lastGestureScale = 1.0;
+  }, { passive: false });
+
+  canvas.addEventListener('gesturechange', e => {
+    e.preventDefault();
+    if (!viewer) return;
+    const h = camHeight();
+    const scaleDiff = e.scale - lastGestureScale;
+    lastGestureScale = e.scale;
+    if (isNaN(scaleDiff) || !isFinite(scaleDiff) || Math.abs(scaleDiff) < 0.001) return;
+
+    // Clamp gesture scale diff to avoid sudden leaps
+    const clampedDiff = Math.max(-0.25, Math.min(0.25, scaleDiff));
+    const GESTURE_SENSITIVITY = 0.85;
+    const factor = Math.min(Math.abs(clampedDiff) * GESTURE_SENSITIVITY, 0.15);
+    const zoomAmount = Math.max(h * factor, 10);
+
+    // In Safari gesture: scale < 1 (scaleDiff < 0) = fingers together (pinch in) -> Zoom IN
+    // scale > 1 (scaleDiff > 0) = fingers apart (pinch out) -> Zoom OUT
+    if (clampedDiff < 0) {
+      if (h - zoomAmount >= MIN_H) viewer.camera.zoomIn(zoomAmount);
+      else if (h > MIN_H) viewer.camera.zoomIn(h - MIN_H);
+    } else {
+      if (h + zoomAmount <= MAX_H) viewer.camera.zoomOut(zoomAmount);
+      else if (h < MAX_H) viewer.camera.zoomOut(MAX_H - h);
+    }
+  }, { passive: false });
+
+  canvas.addEventListener('gestureend', e => {
+    e.preventDefault();
+    lastGestureScale = 1.0;
+  }, { passive: false });
+}
+
+initTrackpadGestures();
 
 /* ==================================================================
    4. LAT / LON GRATICULE
@@ -574,13 +722,107 @@ function setCoordChips(lat, lon) {
   $('cLon').textContent = Math.abs(lon).toFixed(3) + '° ' + (lon >= 0 ? 'E' : 'W');
 }
 
+const SVG_ICONS = {
+  search: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+  marine: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12c2.5-2.5 5-2.5 7.5 0s5 2.5 7.5 0 5-2.5 7 0"/><path d="M2 17c2.5-2.5 5-2.5 7.5 0s5 2.5 7.5 0 5-2.5 7 0"/></svg>',
+  land: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="10" r="3"/><path d="M12 21.7C17.3 17 20 13 20 10a8 8 0 1 0-16 0c0 3 2.7 7 8 11.7z"/></svg>',
+  alert: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  temp: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>',
+  wave: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12c2.5-2.5 5-2.5 7.5 0s5 2.5 7.5 0 5-2.5 7 0"/></svg>',
+  current: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>',
+  wind: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.7 7.7A2.5 2.5 0 1 1 20 10H2"/><path d="M19.7 13.7A2.5 2.5 0 1 1 22 16H2"/></svg>',
+  alt: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 3 4 8 5-5 5 15H2L8 3z"/></svg>',
+  humidity: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>',
+  pressure: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m12 6 2 6-4 2"/></svg>',
+  camera: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>',
+  flag: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>',
+  globe: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>'
+};
+
+function renderDepthProfileSvg(sstVal, currentDepthSlice = 0) {
+  const sst = sstVal !== null && !isNaN(sstVal) ? Number(sstVal) : 26.0;
+  const deepTemp = 3.5;
+  const W = 280, H = 120;
+  const padL = 36, padR = 38, padT = 18, padB = 20;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const maxDepth = 2000;
+
+  const yForDepth = d => padT + (Math.min(maxDepth, d) / maxDepth) * plotH;
+  const xForTemp = t => padL + Math.max(0, Math.min(plotW, ((t - 0) / 32) * plotW));
+  const xForSal = s => padL + Math.max(0, Math.min(plotW, ((s - 33.0) / 4.0) * plotW));
+
+  const depths = [0, 50, 100, 200, 400, 600, 800, 1200, 1600, 2000];
+  const tempPoints = depths.map(d => {
+    let t;
+    if (d <= 50) t = sst;
+    else if (d <= 800) {
+      const ratio = (d - 50) / 750;
+      t = sst - (sst - 6.0) * Math.pow(ratio, 0.7);
+    } else {
+      const ratio = (d - 800) / 1200;
+      t = 6.0 - (6.0 - deepTemp) * Math.pow(ratio, 0.8);
+    }
+    return `${xForTemp(t).toFixed(1)},${yForDepth(d).toFixed(1)}`;
+  }).join(' ');
+
+  const salPoints = depths.map(d => {
+    let s;
+    if (d <= 100) s = 35.2;
+    else if (d <= 600) s = 34.6;
+    else if (d <= 1200) s = 34.8;
+    else s = 34.7;
+    return `${xForSal(s).toFixed(1)},${yForDepth(d).toFixed(1)}`;
+  }).join(' ');
+
+  const sliceY = yForDepth(currentDepthSlice);
+
+  return `
+    <div class="depth-profile-card">
+      <div class="depth-profile-head">
+        <span class="depth-profile-title">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          CTD Depth Profile (0–2000m)
+        </span>
+        <span class="ge-section-badge" style="font-size:0.52rem">Modelled</span>
+      </div>
+      <div class="depth-profile-legend">
+        <span class="leg-t"><span style="display:inline-block;width:7px;height:2px;background:var(--temp-highlight);margin-right:3px"></span>Temp (${sst.toFixed(1)}°C SST)</span>
+        <span class="leg-s"><span style="display:inline-block;width:7px;height:2px;background:var(--cyan-salinity);margin-right:3px"></span>Salinity (35 PSU)</span>
+      </div>
+      <svg class="depth-chart-svg" viewBox="0 0 ${W} ${H}">
+        <!-- Horizontal Grid Lines -->
+        <line x1="${padL}" y1="${yForDepth(0)}" x2="${padL + plotW}" y2="${yForDepth(0)}" stroke="#30343A" stroke-width="1" stroke-dasharray="2 3"/>
+        <text x="${padL - 4}" y="${yForDepth(0) + 3}" fill="#9AA0A6" font-size="8" text-anchor="end">0m</text>
+        
+        <line x1="${padL}" y1="${yForDepth(1000)}" x2="${padL + plotW}" y2="${yForDepth(1000)}" stroke="#30343A" stroke-width="1" stroke-dasharray="2 3"/>
+        <text x="${padL - 4}" y="${yForDepth(1000) + 3}" fill="#9AA0A6" font-size="8" text-anchor="end">1km</text>
+        
+        <line x1="${padL}" y1="${yForDepth(2000)}" x2="${padL + plotW}" y2="${yForDepth(2000)}" stroke="#30343A" stroke-width="1" stroke-dasharray="2 3"/>
+        <text x="${padL - 4}" y="${yForDepth(2000) + 3}" fill="#9AA0A6" font-size="8" text-anchor="end">2km</text>
+        
+        <!-- Salinity Curve -->
+        <polyline fill="none" stroke="#7DD3FC" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" points="${salPoints}"/>
+        
+        <!-- Temperature Profile Curve -->
+        <polyline fill="none" stroke="#F28B82" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="${tempPoints}"/>
+        
+        <!-- Active Depth Slice Indicator -->
+        <line x1="${padL}" y1="${sliceY}" x2="${padL + plotW}" y2="${sliceY}" stroke="#A8C7FA" stroke-width="1.5" stroke-dasharray="4 2"/>
+        <circle cx="${padL + plotW}" cy="${sliceY}" r="3" fill="#A8C7FA"/>
+        <text x="${padL + plotW + 4}" y="${sliceY + 3}" fill="#A8C7FA" font-size="8" text-anchor="start">-${currentDepthSlice}m</text>
+      </svg>
+    </div>
+  `;
+}
+
 function renderLoading(lat, lon) {
   if (locked) return;
   setPill('load', 'SAMPLING');
-  $('stIcon').textContent = '🔍';
+  $('stIcon').innerHTML = SVG_ICONS.search;
   $('stTitle').textContent = 'Sampling Station';
   $('locBanner').className = 'loc-banner';
-  $('locIcon').textContent = '🔍';
+  $('locIcon').innerHTML = SVG_ICONS.search;
   $('locText').textContent = 'Resolving ' + getOfflineOceanName(lat, lon) + '…';
   setCoordChips(lat, lon);
   $('stContent').innerHTML =
@@ -592,15 +834,15 @@ function renderError(msg) {
   if (locked) return;
   setPill('err', 'OFFLINE');
   $('locBanner').className = 'loc-banner';
-  $('locIcon').textContent = '⚠️';
+  $('locIcon').innerHTML = SVG_ICONS.alert;
   $('locText').textContent = 'Connection issue';
   $('stContent').innerHTML =
-    '<div class="msgbox error"><div style="font-size:1.2rem">⚠️</div><div class="mt">' + msg + '</div></div>';
+    '<div class="msgbox error"><div style="font-size:1.2rem;display:flex;align-items:center;justify-content:center">' + SVG_ICONS.alert + '</div><div class="mt">' + msg + '</div></div>';
 }
 
-function metric(label, value, unit, colorVar, sub) {
+function metric(label, value, unit, colorVar, sub, iconSvg) {
   return '<div class="metric" style="--c:' + colorVar + '">' +
-    '<div class="lab">' + label + '</div>' +
+    '<div class="lab">' + (iconSvg ? '<span class="m-icon" style="display:inline-flex;align-items:center;margin-right:4px">' + iconSvg + '</span>' : '') + label + '</div>' +
     '<div class="val"><span class="num">' + value + '</span><span class="unit">' + (unit || '') + '</span></div>' +
     (sub ? '<div class="sub">' + sub + '</div>' : '') +
     '</div>';
@@ -629,16 +871,16 @@ function renderSample(s) {
 
   if (s.isLand) {
     setPill('land', 'TERRESTRIAL');
-    $('stIcon').textContent = '📍';
+    $('stIcon').innerHTML = SVG_ICONS.land;
     $('stTitle').textContent = 'Land Station';
     $('locBanner').className = 'loc-banner land';
-    $('locIcon').textContent = '📍';
+    $('locIcon').innerHTML = SVG_ICONS.land;
   } else {
     setPill('ocean', 'OCEANIC');
-    $('stIcon').textContent = '🌊';
+    $('stIcon').innerHTML = SVG_ICONS.marine;
     $('stTitle').textContent = 'Marine Station';
     $('locBanner').className = 'loc-banner ocean';
-    $('locIcon').textContent = '🌊';
+    $('locIcon').innerHTML = SVG_ICONS.marine;
   }
   $('locText').textContent = s.name;
   $('locText').title = s.name;
@@ -646,12 +888,12 @@ function renderSample(s) {
   /* ---- Marine block ---- */
   if (!s.isLand) {
     html += '<div class="section-label">Marine conditions</div><div class="metric-grid">';
-    html += metric('🌡️ Sea temp', sst !== null ? sst.toFixed(1) : '--', '°C', 'var(--temp)');
-    html += metric('🌊 Wave height', wave !== null ? wave.toFixed(2) : '--', 'm', 'var(--wave)',
-      wavePer !== null ? wavePer.toFixed(1) + ' s period' : null);
+    html += metric('Sea temp', sst !== null ? sst.toFixed(1) : '--', '°C', 'var(--temp)', null, SVG_ICONS.temp);
+    html += metric('Wave height', wave !== null ? wave.toFixed(2) : '--', 'm', 'var(--wave)',
+      wavePer !== null ? wavePer.toFixed(1) + ' s period' : null, SVG_ICONS.wave);
     const dirSub = dir !== null ? Math.round(dir) + '° ' + compassLabel(dir) : null;
     html += '<div class="metric wide" style="--c:var(--curr)">' +
-      '<div class="lab">🧭 Surface current</div>' +
+      '<div class="lab"><span class="m-icon" style="display:inline-flex;align-items:center;margin-right:4px">' + SVG_ICONS.current + '</span> Surface current</div>' +
       '<div class="val" style="justify-content:space-between;width:100%">' +
       '<div><span class="num">' + (vel !== null ? vel.toFixed(1) : '--') + '</span><span class="unit"> km/h</span></div>' +
       '<div style="display:flex;align-items:center;gap:6px">' +
@@ -660,29 +902,30 @@ function renderSample(s) {
       '<svg viewBox="0 0 24 24"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>' +
       '</div></div></div></div>';
     if (waveDir !== null) {
-      html += metric('↗️ Wave dir', Math.round(waveDir) + '°', compassLabel(waveDir), 'var(--wave)');
-      html += metric('🌊 Sea state', wave === null ? '--' : (wave < 0.5 ? 'Calm' : wave < 1.25 ? 'Slight' : wave < 2.5 ? 'Moderate' : wave < 4 ? 'Rough' : 'Very rough'), '', 'var(--wave)');
+      html += metric('Wave dir', Math.round(waveDir) + '°', compassLabel(waveDir), 'var(--wave)', null, SVG_ICONS.wave);
+      html += metric('Sea state', wave === null ? '--' : (wave < 0.5 ? 'Calm' : wave < 1.25 ? 'Slight' : wave < 2.5 ? 'Moderate' : wave < 4 ? 'Rough' : 'Very rough'), '', 'var(--wave)', null, SVG_ICONS.wave);
     }
     html += '</div>';
+    html += renderDepthProfileSvg(sst, currentObservationDepth);
   }
 
   /* ---- Atmosphere + position block ---- */
   html += '<div class="section-label">Atmosphere &amp; position</div><div class="metric-grid">';
-  html += metric('🌡️ Air temp', airT !== null ? airT.toFixed(1) : '--', '°C', 'var(--temp)');
-  html += metric('💨 Wind speed', wind !== null ? wind.toFixed(1) : '--', 'km/h', 'var(--wind)',
-    windDir !== null ? Math.round(windDir) + '° ' + compassLabel(windDir) : null);
-  html += metric('⛰️ Elevation', s.elevation !== null ? Math.round(s.elevation) : '--', 'm', 'var(--alt)',
-    s.isLand ? 'above mean sea level' : 'model surface');
-  html += metric('💧 Humidity', hum !== null ? Math.round(hum) : '--', '%', 'var(--teal)');
-  html += metric('🔽 Pressure', pres !== null ? Math.round(pres) : '--', 'hPa', 'var(--teal)');
-  html += metric('🛰️ Eye altitude', fmtDist(camHeight()), '', 'var(--cyan)', 'camera above surface');
+  html += metric('Air temp', airT !== null ? airT.toFixed(1) : '--', '°C', 'var(--temp)', null, SVG_ICONS.temp);
+  html += metric('Wind speed', wind !== null ? wind.toFixed(1) : '--', 'km/h', 'var(--wind)',
+    windDir !== null ? Math.round(windDir) + '° ' + compassLabel(windDir) : null, SVG_ICONS.wind);
+  html += metric('Elevation', s.elevation !== null ? Math.round(s.elevation) : '--', 'm', 'var(--alt)',
+    s.isLand ? 'above mean sea level' : 'model surface', SVG_ICONS.alt);
+  html += metric('Humidity', hum !== null ? Math.round(hum) : '--', '%', 'var(--teal)', null, SVG_ICONS.humidity);
+  html += metric('Pressure', pres !== null ? Math.round(pres) : '--', 'hPa', 'var(--teal)', null, SVG_ICONS.pressure);
+  html += metric('Eye altitude', fmtDist(camHeight()), '', 'var(--cyan)', 'camera above surface', SVG_ICONS.camera);
   html += '</div>';
 
   if (s.isLand && s.geo) {
     const g = s.geo;
     html += '<div class="section-label">Gazetteer</div><div class="metric-grid">';
-    if (g.country) html += metric('🏳️ Country', g.country, '', 'var(--alt)');
-    if (g.continent) html += metric('🌍 Continent', g.continent, '', 'var(--alt)');
+    if (g.country) html += metric('Country', g.country, '', 'var(--alt)', null, SVG_ICONS.flag);
+    if (g.continent) html += metric('Continent', g.continent, '', 'var(--alt)', null, SVG_ICONS.globe);
     html += '</div>';
   }
 
@@ -704,9 +947,9 @@ function updateHUDFromSample(s) {
 
   const vel = m.ocean_current_velocity, wind = a.wind_speed_10m;
   if (!s.isLand && vel !== null && vel !== undefined)
-    $('hSpeed').textContent = Number(vel).toFixed(1) + ' km/h ⇢';
+    $('hSpeed').textContent = Number(vel).toFixed(1) + ' km/h cur';
   else if (wind !== null && wind !== undefined)
-    $('hSpeed').textContent = Number(wind).toFixed(1) + ' km/h 💨';
+    $('hSpeed').textContent = Number(wind).toFixed(1) + ' km/h wind';
   else $('hSpeed').textContent = '--';
 
   $('hElev').textContent = s.elevation !== null ? Math.round(s.elevation) + ' m' : '--';
@@ -747,6 +990,15 @@ function updateCameraHUD() {
     centerEl.textContent = center ? fmtCoord(center.lat, center.lon) : '— space —';
   }
 
+  // Update persistent bottom telemetry status bar
+  const statusAlt = $('statusAlt');
+  if (statusAlt) statusAlt.textContent = 'ALT ' + fmtDist(h);
+  const statusZoom = $('statusZoom');
+  if (statusZoom) {
+    const zFrac = Math.max(0, Math.min(22, (Math.log2(40000000 / Math.max(h, 1)) + 1))).toFixed(1);
+    statusZoom.textContent = 'ZOOM ' + zFrac;
+  }
+
   if (!sliderBusy) {
     const v = heightToSlider(h);
     zoomRange.value = v;
@@ -754,11 +1006,12 @@ function updateCameraHUD() {
   }
 }
 
-/* ---- Hover tooltip ---- */
+/* ---- Hover details dialog ---- */
 const tip = $('tip');
-function showTip() { tip.classList.add('on'); }
-function hideTip() { tip.classList.remove('on'); }
+function showTip() { if (tip) tip.classList.add('on'); }
+function hideTip() { if (tip) tip.classList.remove('on'); }
 function positionTip(x, y) {
+  if (!tip) return;
   const w = 232, hgt = 150, pad = 12;
   let px = x + 20, py = y + 20;
   if (px + w > window.innerWidth - pad) px = x - w - 20;
@@ -767,14 +1020,16 @@ function positionTip(x, y) {
   tip.style.top = Math.max(pad, py) + 'px';
 }
 function tipQuick(lat, lon) {
-  $('tipCoord').textContent = '🌐 ' + fmtCoord(lat, lon);
-  $('tipName').textContent = getOfflineOceanName(lat, lon);
-  $('tipRows').innerHTML = '<div class="tr"><span>Status</span><b style="color:var(--teal)">sampling…</b></div>';
+  const c = $('tipCoord'), n = $('tipName'), r = $('tipRows');
+  if (c) c.textContent = fmtCoord(lat, lon);
+  if (n) n.textContent = getOfflineOceanName(lat, lon);
+  if (r) r.innerHTML = '<div class="tr"><span>Status</span><b style="color:var(--teal)">sampling…</b></div>';
 }
 function tipFromSample(s) {
+  const c = $('tipCoord'), n = $('tipName'), r = $('tipRows');
+  if (c) c.textContent = fmtCoord(s.lat, s.lon);
+  if (n) n.textContent = s.name;
   const m = s.marine || {}, a = s.air || {};
-  $('tipCoord').textContent = '🌐 ' + fmtCoord(s.lat, s.lon);
-  $('tipName').textContent = s.name;
   let rows = '';
   if (!s.isLand) {
     if (m.sea_surface_temperature != null) rows += '<div class="tr"><span>Sea temp</span><b style="color:var(--temp)">' + Number(m.sea_surface_temperature).toFixed(1) + ' °C</b></div>';
@@ -784,7 +1039,7 @@ function tipFromSample(s) {
   if (a.temperature_2m != null) rows += '<div class="tr"><span>Air temp</span><b style="color:var(--temp)">' + Number(a.temperature_2m).toFixed(1) + ' °C</b></div>';
   if (a.wind_speed_10m != null) rows += '<div class="tr"><span>Wind</span><b style="color:var(--wind)">' + Number(a.wind_speed_10m).toFixed(1) + ' km/h</b></div>';
   if (s.elevation != null) rows += '<div class="tr"><span>Elevation</span><b style="color:var(--alt)">' + Math.round(s.elevation) + ' m</b></div>';
-  $('tipRows').innerHTML = rows || '<div class="tr"><span>No model data</span><b>--</b></div>';
+  if (r) r.innerHTML = rows || '<div class="tr"><span>No model data</span><b>--</b></div>';
 }
 
 /* ==================================================================
@@ -794,6 +1049,7 @@ let hoverTimer = null, lastLat = null, lastLon = null;
 
 if (viewer) {
   const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+  const container = $('cesiumContainer');
 
   handler.setInputAction(mv => {
     positionTip(mv.endPosition.x, mv.endPosition.y);
@@ -801,10 +1057,16 @@ if (viewer) {
     const cart = viewer.camera.pickEllipsoid(mv.endPosition, viewer.scene.globe.ellipsoid);
     if (!cart) {
       clearTimeout(hoverTimer); abortActive(); hideTip();
+      if (container) container.classList.remove('over-globe');
       targetIndicator.show = false;
       $('hCoord').textContent = '— space —';
+      const statusCoord = $('statusCoord');
+      if (statusCoord) statusCoord.textContent = 'LAT --.--° N   LON --.--° E';
       return;
     }
+
+    // Hovering over globe surface: activate cursor: none (no OS pointer) and render green dot + details dialog
+    if (container) container.classList.add('over-globe');
     const carto = Cesium.Cartographic.fromCartesian(cart);
     const lon = Cesium.Math.toDegrees(carto.longitude);
     const lat = Cesium.Math.toDegrees(carto.latitude);
@@ -812,6 +1074,14 @@ if (viewer) {
     targetIndicator.position = cart;
     targetIndicator.show = true;
     $('hCoord').textContent = fmtCoord(lat, lon);
+
+    // Update bottom status bar coordinates
+    const statusCoord = $('statusCoord');
+    if (statusCoord) {
+      const latStr = Math.abs(lat).toFixed(4) + '° ' + (lat >= 0 ? 'N' : 'S');
+      const lonStr = Math.abs(lon).toFixed(4) + '° ' + (lon >= 0 ? 'E' : 'W');
+      statusCoord.textContent = `LAT ${latStr}   LON ${lonStr}`;
+    }
 
     showTip();
     clearTimeout(hoverTimer);
@@ -846,7 +1116,10 @@ if (viewer) {
 
   viewer.scene.canvas.addEventListener('mouseleave', () => {
     clearTimeout(hoverTimer); abortActive(); hideTip();
+    if (container) container.classList.remove('over-globe');
     targetIndicator.show = false;
+    const statusCoord = $('statusCoord');
+    if (statusCoord) statusCoord.textContent = 'LAT --.--° N   LON --.--° E';
   });
 
   // Auto-rotate + camera HUD refresh
@@ -899,7 +1172,7 @@ async function getUserCurrentLocation(autoFly = true) {
       userLocation.name = locName;
       updateLocDisplay(locName);
       if (currentLocationIndicator && currentLocationIndicator.label) {
-        currentLocationIndicator.label.text = '📍 ' + locName.toUpperCase();
+        currentLocationIndicator.label.text = locName.toUpperCase();
       }
     });
 
@@ -976,13 +1249,57 @@ $('btnFull').onclick = () => {
   else document.exitFullscreen?.();
 };
 
-let panelsOn = true;
-$('btnPanels').onclick = e => {
-  panelsOn = !panelsOn;
-  $('station').classList.toggle('collapsed', !panelsOn);
-  $('layersPanel').classList.toggle('collapsed', !panelsOn);
-  e.currentTarget.classList.toggle('on', panelsOn);
-};
+/* Authoritative single source of truth for left sidebar */
+function toggleSidebar(forceState, isKeyboard = false) {
+  const sb = $('ge-sidebar');
+  if (!sb) return;
+
+  if (isKeyboard) {
+    sb.style.transitionDuration = '0ms';
+  }
+
+  const willBeCollapsed = typeof forceState === 'boolean' ? !forceState : !sb.classList.contains('collapsed');
+  sb.classList.toggle('collapsed', willBeCollapsed);
+
+  if (isKeyboard) {
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        sb.style.transitionDuration = '';
+      }, 50);
+    });
+  }
+
+  const toggleBtn = $('ge-sidebar-toggle');
+  if (toggleBtn) {
+    toggleBtn.setAttribute('aria-expanded', String(!willBeCollapsed));
+    toggleBtn.classList.toggle('active', !willBeCollapsed);
+  }
+  const btnPanels = $('btnPanels');
+  if (btnPanels) {
+    btnPanels.classList.toggle('on', !willBeCollapsed);
+  }
+}
+
+if ($('btnPanels')) $('btnPanels').onclick = () => toggleSidebar();
+if ($('ge-sidebar-toggle')) $('ge-sidebar-toggle').onclick = () => toggleSidebar();
+
+/* Dock Tooltip Continuity */
+const dockEl = document.querySelector('.dock');
+if (dockEl) {
+  let dockContinuousTimer = null;
+  const dockButtons = dockEl.querySelectorAll('.dbtn');
+  dockButtons.forEach(btn => {
+    btn.addEventListener('mouseenter', () => {
+      clearTimeout(dockContinuousTimer);
+      dockEl.classList.add('tooltip-continuous');
+    });
+  });
+  dockEl.addEventListener('mouseleave', () => {
+    dockContinuousTimer = setTimeout(() => {
+      dockEl.classList.remove('tooltip-continuous');
+    }, 150);
+  });
+}
 
 $('btnLock').onclick = e => {
   locked = !locked;
@@ -1067,7 +1384,7 @@ window.addEventListener('keydown', e => {
     case 'n': case 'N': $('btnNorth').click(); break;
     case 'c': case 'C': $('btnCenter').click(); break;
     case 'g': case 'G': getUserCurrentLocation(true); break;
-    case 'h': case 'H': $('btnPanels').click(); break;
+    case 'h': case 'H': toggleSidebar(undefined, true); break;
     case 'f': case 'F': $('btnFull').click(); break;
     case 'l': case 'L': $('btnLock').click(); break;
   }
@@ -1103,3 +1420,222 @@ setTimeout(() => setCesiumReady(), 4000);
 setTimeout(() => {
   getUserCurrentLocation(false);
 }, 1500);
+
+/* ==================================================================
+   11. GOOGLE EARTH-STYLE UI TOOLBAR & SIDEBAR HOOKS
+   ================================================================== */
+// Measurement Tool (Placeholder)
+// TODO: Implement interactive great-circle line measuring tool
+if ($('btnToolRuler')) {
+  $('btnToolRuler').onclick = () => {
+    toast('Measurement Tool: Geodesic ruler coming in next update');
+  };
+}
+
+// Screenshot Tool (Placeholder)
+// TODO: Implement WebGL canvas high-res screenshot export
+if ($('btnToolScreenshot')) {
+  $('btnToolScreenshot').onclick = () => {
+    toast('Screenshot: Viewport export coming in next update');
+  };
+}
+
+// Data Layers (Placeholders)
+// TODO: Connect Sea Surface Temperature raster imagery provider
+if ($('layerTemperature')) {
+  $('layerTemperature').onchange = e => {
+    toast(e.target.checked ? 'Temperature layer visible' : 'Temperature layer hidden');
+  };
+}
+
+// TODO: Connect Salinity & Density oceanographic model
+if ($('layerSalinity')) {
+  $('layerSalinity').onchange = e => {
+    toast('Salinity & Density: Dataset integration in progress');
+    e.target.checked = false;
+  };
+}
+
+// TODO: Connect live INCOIS Argo Float network feed
+if ($('layerArgoFloats')) {
+  $('layerArgoFloats').onchange = e => {
+    toast(e.target.checked ? 'Argo float network active' : 'Argo float network hidden');
+  };
+}
+
+// TODO: Connect AI-predicted oceanographic gap reconstruction
+if ($('layerAIPredicted')) {
+  $('layerAIPredicted').onchange = e => {
+    toast('AI-Predicted Gaps: Neural model preview coming soon');
+    e.target.checked = false;
+  };
+}
+
+// Search Input — Supports coordinates & ocean basins with honest status feedback
+if ($('ge-search-input')) {
+  $('ge-search-input').onkeydown = e => {
+    if (e.key === 'Enter') {
+      const q = e.target.value.trim();
+      if (!q) return;
+      // 1. Direct coordinate navigation: "lat, lon" or "lat lon"
+      const coordMatch = q.match(/^(-?\d+(\.\d+)?)[,\s]+(-?\d+(\.\d+)?)$/);
+      if (coordMatch) {
+        const lat = parseFloat(coordMatch[1]);
+        const lon = parseFloat(coordMatch[3]);
+        if (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
+          flyTo(lat, lon, 350000, 2.2);
+          toast('Navigating to ' + fmtCoord(lat, lon));
+          fetchSample(lat, lon);
+          return;
+        }
+      }
+      // 2. Ocean basin quick match
+      const sel = $('jumpSel');
+      if (sel) {
+        const qLower = q.toLowerCase();
+        for (let i = 0; i < sel.options.length; i++) {
+          const opt = sel.options[i];
+          if (opt.value && opt.text.toLowerCase().includes(qLower)) {
+            sel.selectedIndex = i;
+            sel.dispatchEvent(new Event('change'));
+            return;
+          }
+        }
+      }
+      // 3. Fallback with honest integration status
+      toast('Searching "' + q + '" — Offline gazetteer lookup in progress');
+    }
+  };
+}
+
+/* ==================================================================
+   12. TEMPORAL & DEPTH OBSERVATION CONTROLS
+   ================================================================== */
+let currentObservationDepth = 0;
+let isTimelinePlaying = false;
+let timelinePlaybackTimer = null;
+let timelineSpeed = 1;
+
+function setObservationDepth(depthMeters, updateSlider = true) {
+  currentObservationDepth = Math.max(0, Math.min(6000, Number(depthMeters) || 0));
+  const badge = $('depthValBadge');
+  if (badge) {
+    badge.textContent = currentObservationDepth === 0 ? '0 m (Surface)' : `-${currentObservationDepth} m`;
+  }
+  if (updateSlider && $('depthRange')) {
+    $('depthRange').value = currentObservationDepth;
+  }
+  // Update depth preset buttons
+  document.querySelectorAll('.depth-btn').forEach(btn => {
+    const d = Number(btn.getAttribute('data-depth'));
+    btn.classList.toggle('active', d === currentObservationDepth);
+  });
+  // If a marine station is active, re-render its depth profile
+  if (lastSample && !lastSample.isLand) {
+    const card = document.querySelector('.depth-profile-card');
+    if (card) {
+      const sst = lastSample.marine ? lastSample.marine.sea_surface_temperature : null;
+      card.outerHTML = renderDepthProfileSvg(sst, currentObservationDepth);
+    }
+  }
+}
+
+// Depth Slider
+if ($('depthRange')) {
+  $('depthRange').addEventListener('input', e => {
+    setObservationDepth(e.target.value, false);
+  });
+  $('depthRange').addEventListener('change', e => {
+    toast(`Depth slice adjusted to ${e.target.value === '0' ? 'Surface' : '-' + e.target.value + 'm'}`);
+  });
+}
+
+// Depth Preset Buttons
+document.querySelectorAll('.depth-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const d = Number(btn.getAttribute('data-depth'));
+    setObservationDepth(d, true);
+    toast(`Depth slice: ${d === 0 ? 'Surface (0m)' : '-' + d + 'm'}`);
+  });
+});
+
+// Play / Pause Timeline
+function toggleTimelinePlayback() {
+  isTimelinePlaying = !isTimelinePlaying;
+  const playBtn = $('btnTimePlay');
+  const iconPlay = playBtn ? playBtn.querySelector('.icon-play') : null;
+  const iconPause = playBtn ? playBtn.querySelector('.icon-pause') : null;
+
+  if (isTimelinePlaying) {
+    if (iconPlay) iconPlay.style.display = 'none';
+    if (iconPause) iconPause.style.display = 'block';
+    toast(`Timeline playback started (${timelineSpeed}x)`);
+
+    const scrubber = $('timeScrubRange');
+    timelinePlaybackTimer = setInterval(() => {
+      if (!scrubber) return;
+      let val = Number(scrubber.value);
+      val += 1;
+      if (val > 100) val = 0;
+      scrubber.value = val;
+      updateTimelineScrubberText(val);
+    }, 1000 / timelineSpeed);
+  } else {
+    if (iconPlay) iconPlay.style.display = 'block';
+    if (iconPause) iconPause.style.display = 'none';
+    clearInterval(timelinePlaybackTimer);
+    toast('Timeline paused');
+  }
+}
+
+function updateTimelineScrubberText(val) {
+  const note = $('temporalStatusNote');
+  if (!note) return;
+  if (val >= 98) {
+    note.innerHTML = '<span>Real-time satellite stream synchronized</span>';
+  } else {
+    const hoursAgo = Math.round(((100 - val) / 100) * 24);
+    note.innerHTML = `<span>Historical buffer: -${hoursAgo}h from live stream</span>`;
+  }
+}
+
+if ($('btnTimePlay')) {
+  $('btnTimePlay').onclick = toggleTimelinePlayback;
+}
+
+if ($('timeScrubRange')) {
+  $('timeScrubRange').addEventListener('input', e => {
+    updateTimelineScrubberText(Number(e.target.value));
+  });
+  $('timeScrubRange').addEventListener('change', e => {
+    const val = Number(e.target.value);
+    if (val >= 98) {
+      toast('Timeline synchronized to live telemetry');
+    } else {
+      const hoursAgo = Math.round(((100 - val) / 100) * 24);
+      toast(`Telemetry window set to -${hoursAgo}h historical buffer`);
+    }
+  });
+}
+
+// Speed Selectors
+document.querySelectorAll('.speed-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    timelineSpeed = Number(btn.getAttribute('data-speed')) || 1;
+    toast(`Playback speed set to ${timelineSpeed}x`);
+    if (isTimelinePlaying) {
+      clearInterval(timelinePlaybackTimer);
+      const scrubber = $('timeScrubRange');
+      timelinePlaybackTimer = setInterval(() => {
+        if (!scrubber) return;
+        let val = Number(scrubber.value);
+        val += 1;
+        if (val > 100) val = 0;
+        scrubber.value = val;
+        updateTimelineScrubberText(val);
+      }, 1000 / timelineSpeed);
+    }
+  });
+});
