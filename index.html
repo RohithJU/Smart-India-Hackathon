@@ -479,17 +479,21 @@
       <!-- 1. SEARCH -->
       <div class="ge-sidebar-section ge-search-section">
         <div class="ge-search-bar">
-          <button type="button" class="ge-search-icon-btn" id="btnSidebarSearchIcon" aria-label="Enter coordinates"
-            title="Click to enter Latitude &amp; Longitude in separate boxes">
+          <button type="button" class="ge-search-icon-btn" id="btnSidebarSearchIcon" aria-label="Search location"
+            title="Click to search location or coordinate">
             <svg class="ge-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <circle cx="11" cy="11" r="8"></circle>
               <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
             </svg>
           </button>
-          <input type="text" id="ge-search-input" placeholder="Search marine coordinate or station…"
-            aria-label="Search marine coordinate or station" autocomplete="off" />
+          <input type="text" id="ge-search-input" placeholder="Search marine coordinate, city or ocean…"
+            aria-label="Search marine coordinate, city or ocean" autocomplete="off" />
+          <button type="button" class="ge-search-clear-btn" id="btnSearchClear" title="Clear search"
+            aria-label="Clear search" style="display: none;">×</button>
         </div>
+        <div class="ge-search-results" id="geSearchResults" style="display: none;" role="listbox"
+          aria-label="Search results"></div>
       </div>
 
       <!-- 2. DATA LAYERS (Comprehensive 10-Layer Controller) -->
@@ -1342,6 +1346,8 @@
         <span class="lic-time" id="licTimestamp">Live Real-time</span>
       </div>
       <button type="button" class="lic-inspect-btn" id="btnLicInspect">Station Profile →</button>
+      <button type="button" class="lic-clear-search-btn" id="btnLicClear" style="display: none;"
+        title="Exit Search Mode and resume hover">× Clear Search</button>
     </div>
   </div>
 
@@ -1464,6 +1470,10 @@
       <span id="statusAlt">ALT 842 km</span>
       <span class="status-sep">|</span>
       <span id="statusZoom">ZOOM 5.8</span>
+      <span class="status-sep">|</span>
+      <span id="statusAttribution" style="opacity:0.75;font-size:0.62rem;">© <a
+          href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener"
+          style="color:inherit;text-decoration:none;">OpenStreetMap</a></span>
     </div>
   </footer>
 

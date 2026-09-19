@@ -1333,6 +1333,72 @@ select {
   color: var(--text-secondary);
 }
 
+.ge-search-clear-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.ge-search-clear-btn:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+/* Search Results Dropdown */
+.ge-search-results {
+  margin-top: 6px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  box-shadow: var(--md-elevation-3);
+  overflow: hidden;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.ge-search-result-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: background var(--md-duration-short) ease;
+}
+
+.ge-search-result-item:last-child {
+  border-bottom: none;
+}
+
+.ge-search-result-item:hover,
+.ge-search-result-item.selected {
+  background: var(--surface-hover);
+}
+
+.ge-search-result-title {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ge-search-result-sub {
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Data Layer List */
 .ge-layer-list {
   display: flex;
@@ -4487,7 +4553,7 @@ select.jump option {
 .location-info-card {
   position: fixed;
   top: 68px;
-  right: 74px;
+  right: 300px;
   width: 290px;
   z-index: 75;
   background: rgba(23, 26, 31, 0.94);
@@ -4507,7 +4573,7 @@ select.jump option {
 }
 
 .ocean-profile-panel:not(.collapsed)~.location-info-card {
-  right: 426px;
+  right: 710px;
 }
 
 .lic-header {
@@ -4561,6 +4627,27 @@ select.jump option {
   font-size: 0.68rem;
   color: var(--blue-interactive);
   font-weight: 600;
+}
+
+.lic-clear-search-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(234, 67, 53, 0.15);
+  border: 1px solid rgba(234, 67, 53, 0.35);
+  color: #F28B82;
+  font-family: var(--ui);
+  font-size: 0.65rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+
+.lic-clear-search-btn:hover {
+  background: rgba(234, 67, 53, 0.28);
+  color: #FFFFFF;
 }
 
 .lic-grid {

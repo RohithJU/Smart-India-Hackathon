@@ -774,7 +774,24 @@ function getBathymetryDepth(lat, lon) {
 /* ==================================================================
    6. DATA FETCHING (marine + atmospheric + reverse geocode)
    ================================================================== */
-const geoCache = new Map();
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/[&<>"']/g, m => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[m]));
+}
+
+let interactionMode = 'hover'; // 'hover' | 'search'
+let selectedSearchResult = null;
+const locationCache = new Map();
+const marineCache = new Map();
+let hoverAbortController = null;
+let hoverRequestId = 0;
+
 let activeController = null;
 
 function abortActive() {
@@ -782,45 +799,71 @@ function abortActive() {
 }
 
 async function reverseGeocode(lat, lon, signal) {
-  const key = lat.toFixed(2) + ',' + lon.toFixed(2);
-  if (geoCache.has(key)) return geoCache.get(key);
+  const latKey = lat.toFixed(3);
+  const lonKey = lon.toFixed(3);
+  const cacheKey = `${latKey},${lonKey}`;
+  if (locationCache.has(cacheKey)) return locationCache.get(cacheKey);
+
   try {
-    const url = 'https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=' +
-      lat.toFixed(4) + '&longitude=' + lon.toFixed(4) + '&localityLanguage=en';
-    const r = await fetch(url, { signal });
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}&zoom=10&addressdetails=1`;
+    const r = await fetch(url, {
+      signal,
+      headers: { 'Accept': 'application/json' }
+    });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
 
-    let oceanName = null;
-    if (d.localityInfo && Array.isArray(d.localityInfo.informative)) {
-      for (const it of d.localityInfo.informative) {
-        const desc = (it.description || '').toLowerCase(), nm = (it.name || '').toLowerCase();
-        if (desc.includes('ocean') || desc.includes('sea') || desc.includes('gulf') || desc.includes('bay') ||
-          desc.includes('strait') || nm.includes('ocean') || nm.includes('sea')) { oceanName = it.name; break; }
-      }
-    }
-    const parts = [];
-    if (d.locality && d.locality !== d.countryName) parts.push(d.locality);
-    else if (d.city && d.city !== d.countryName) parts.push(d.city);
-    if (d.principalSubdivision && d.principalSubdivision !== d.countryName && !parts.includes(d.principalSubdivision))
-      parts.push(d.principalSubdivision);
-    if (d.countryName) parts.push(d.countryName);
+    if (d && d.address && d.address.country) {
+      const country = d.address.country || '';
+      const state = d.address.state || d.address.region || d.address.province || d.address.state_district || '';
+      const city = d.address.city || d.address.town || d.address.village || d.address.suburb || d.address.county || '';
 
+      const parts = [];
+      if (city && city !== country) parts.push(city);
+      if (state && state !== country && !parts.includes(state)) parts.push(state);
+      if (country) parts.push(country);
+
+      const res = {
+        isLand: true,
+        country,
+        state,
+        city,
+        name: parts.length ? parts.join(', ') : (country || getOfflineLandRegion(lat, lon)),
+        landLocation: parts.length ? parts.join(', ') : getOfflineLandRegion(lat, lon),
+        oceanName: ''
+      };
+      locationCache.set(cacheKey, res);
+      return res;
+    }
+
+    // Water / Ocean coordinates
+    const oceanName = (d && d.name) || getOfflineOceanName(lat, lon);
     const res = {
-      isLand: Boolean(d.countryName),
-      country: d.countryName || '', state: d.principalSubdivision || '',
-      city: d.city || d.locality || '', continent: d.continent || '',
-      landLocation: parts.length ? parts.join(', ') : getOfflineLandRegion(lat, lon),
+      isLand: false,
+      country: '',
+      state: '',
+      city: '',
+      name: oceanName,
+      landLocation: '',
       oceanName: oceanName || getOfflineOceanName(lat, lon)
     };
-    geoCache.set(key, res);
+    locationCache.set(cacheKey, res);
     return res;
   } catch (e) {
     if (e.name === 'AbortError') throw e;
-    return {
-      isLand: false, country: '', state: '', city: '', continent: '',
-      landLocation: getOfflineLandRegion(lat, lon), oceanName: getOfflineOceanName(lat, lon)
+    // Fallback: offline ocean/sea classifier
+    const oceanName = getOfflineOceanName(lat, lon);
+    const res = {
+      isLand: false,
+      country: '',
+      state: '',
+      city: '',
+      name: oceanName,
+      landLocation: getOfflineLandRegion(lat, lon),
+      oceanName
     };
+    locationCache.set(cacheKey, res);
+    return res;
   }
 }
 
@@ -1153,7 +1196,7 @@ function renderTSDiagram(s, currentDepth) {
     '</div>';
 }
 
-async function fetchSample(lat, lon) {
+async function fetchSample(lat, lon, options = {}) {
   abortActive();
   activeController = new AbortController();
   const signal = activeController.signal;
@@ -1174,13 +1217,19 @@ async function fetchSample(lat, lon) {
     ]);
 
     const geo = gRes.status === 'fulfilled' ? gRes.value : {
-      landLocation: getOfflineLandRegion(lat, lon), oceanName: getOfflineOceanName(lat, lon), isLand: false
+      isLand: false, country: '', state: '', city: '',
+      landLocation: getOfflineLandRegion(lat, lon), oceanName: getOfflineOceanName(lat, lon)
     };
     const marine = mRes.status === 'fulfilled' ? mRes.value : null;
     const air = aRes.status === 'fulfilled' ? aRes.value : null;
     const cur = marine ? marine.current : null;
 
-    const isLand = !cur || (
+    if (cur) {
+      const marineKey = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+      marineCache.set(marineKey, cur);
+    }
+
+    const isLand = geo.isLand || !cur || (
       cur.sea_surface_temperature === null &&
       cur.wave_height === null &&
       cur.ocean_current_velocity === null
@@ -1192,8 +1241,8 @@ async function fetchSample(lat, lon) {
       air: air ? air.current : null,
       elevation: air && typeof air.elevation === 'number' ? air.elevation : null,
       tz: air ? air.timezone_abbreviation : null,
-      name: isLand ? (geo.landLocation || getOfflineLandRegion(lat, lon))
-        : (geo.oceanName || getOfflineOceanName(lat, lon))
+      name: options.label || (isLand ? (geo.name || geo.landLocation || getOfflineLandRegion(lat, lon))
+        : (geo.oceanName || getOfflineOceanName(lat, lon)))
     };
 
     attachOceanography(sample);
@@ -1202,8 +1251,10 @@ async function fetchSample(lat, lon) {
     renderSample(sample);
     updateHUDFromSample(sample);
 
-    // Also update the Location Information Popup Card
-    showLocationInfoCard(lat, lon, sample);
+    // Update location card only on deliberate action (search or click)
+    if (options.updateInfoCard) {
+      showLocationInfoCard(lat, lon, sample, options.isSearch);
+    }
 
   } catch (e) {
     if (e.name === 'AbortError') return;
@@ -1564,9 +1615,57 @@ function updateCameraHUD() {
   }
 }
 
+/* ==================================================================
+   8. HOVER / CLICK INTERACTION & CESIUM PICKING PIPELINE
+   ================================================================== */
+function pickGlobeCoordinates(screenPosition) {
+  if (!viewer || !screenPosition) return null;
+  let cartesian = null;
+
+  // 1. Try scene.pickPosition (picks from Google 3D Tiles and rendered models)
+  if (viewer.scene.pickPositionSupported) {
+    try {
+      cartesian = viewer.scene.pickPosition(screenPosition);
+    } catch (_) { }
+  }
+
+  // 2. Fallback to ray casting on globe
+  if (!cartesian && viewer.scene.globe && viewer.scene.globe.show) {
+    try {
+      const ray = viewer.camera.getPickRay(screenPosition);
+      if (ray) {
+        cartesian = viewer.scene.globe.pick(ray, viewer.scene);
+      }
+    } catch (_) { }
+  }
+
+  // 3. Fallback to pickEllipsoid (works always, even when tiles are loading)
+  if (!cartesian) {
+    try {
+      const ellipsoid = (viewer.scene.globe && viewer.scene.globe.ellipsoid) || Cesium.Ellipsoid.WGS84;
+      cartesian = viewer.camera.pickEllipsoid(screenPosition, ellipsoid);
+    } catch (_) { }
+  }
+
+  if (!cartesian || !Cesium.defined(cartesian)) return null;
+
+  try {
+    const carto = Cesium.Cartographic.fromCartesian(cartesian);
+    if (!carto) return null;
+    const lat = Cesium.Math.toDegrees(carto.latitude);
+    const lon = Cesium.Math.toDegrees(carto.longitude);
+    if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      return null;
+    }
+    return { cartesian, carto, lat, lon };
+  } catch (_) {
+    return null;
+  }
+}
+
 /* Hover details tooltip */
 const tip = $('tip');
-function showTip() { if (tip) tip.classList.add('on'); }
+function showTip() { if (tip && interactionMode !== 'search') tip.classList.add('on'); }
 function hideTip() { if (tip) tip.classList.remove('on'); }
 function positionTip(x, y) {
   if (!tip) return;
@@ -1577,30 +1676,104 @@ function positionTip(x, y) {
   tip.style.left = Math.max(pad, px) + 'px';
   tip.style.top = Math.max(pad, py) + 'px';
 }
+
 function tipQuick(lat, lon) {
   const c = $('tipCoord'), n = $('tipName'), r = $('tipRows');
   if (c) c.textContent = fmtCoord(lat, lon);
   if (n) n.textContent = getOfflineOceanName(lat, lon);
   if (r) r.innerHTML = '<div class="tr"><span>Status</span><b style="color:var(--teal)">sampling…</b></div>';
 }
-function tipFromSample(s) {
+
+function renderHoverTip(loc, lat, lon) {
   const c = $('tipCoord'), n = $('tipName'), r = $('tipRows');
-  if (c) c.textContent = fmtCoord(s.lat, s.lon);
-  if (n) n.textContent = s.name;
-  const m = s.marine || {}, a = s.air || {};
-  let rows = '';
-  if (!s.isLand) {
-    if (m.sea_surface_temperature != null) rows += '<div class="tr"><span>Sea temp</span><b style="color:var(--temp)">' + Number(m.sea_surface_temperature).toFixed(1) + ' °C</b></div>';
-    if (m.wave_height != null) rows += '<div class="tr"><span>Wave</span><b style="color:var(--wave)">' + Number(m.wave_height).toFixed(2) + ' m</b></div>';
-    if (m.ocean_current_velocity != null) rows += '<div class="tr"><span>Current</span><b style="color:var(--curr)">' + Number(m.ocean_current_velocity).toFixed(1) + ' km/h</b></div>';
+  if (c) c.textContent = fmtCoord(lat, lon);
+  if (n) {
+    if (loc.isLand) {
+      // Land: India, Punjab
+      if (loc.country && (loc.state || loc.city)) {
+        const sub = loc.city ? `${loc.city}, ${loc.state || ''}`.replace(/,\s*$/, '') : loc.state;
+        n.innerHTML = `<div>${escapeHtml(loc.country)}</div><div style="font-size:0.75rem;font-weight:400;color:#94a3b8;margin-top:2px;">${escapeHtml(sub)}</div>`;
+      } else {
+        n.textContent = loc.name || loc.country || 'Terrestrial';
+      }
+    } else {
+      // Ocean: Arabian Sea
+      n.textContent = loc.oceanName || loc.name || getOfflineOceanName(lat, lon);
+    }
   }
-  if (a.temperature_2m != null) rows += '<div class="tr"><span>Air temp</span><b style="color:var(--temp)">' + Number(a.temperature_2m).toFixed(1) + ' °C</b></div>';
-  if (r) r.innerHTML = rows || '<div class="tr"><span>No model data</span><b>--</b></div>';
+  if (r) {
+    if (loc.isLand) {
+      r.innerHTML = '<div class="tr"><span>Sector</span><b style="color:#94a3b8">Terrestrial Land</b></div>';
+    } else {
+      r.innerHTML = '<div class="tr"><span>Marine Data</span><b style="color:var(--teal)">sampling…</b></div>';
+    }
+  }
 }
 
-/* ==================================================================
-   8. HOVER / CLICK INTERACTION
-   ================================================================== */
+function renderHoverTipMarine(loc, lat, lon, marine) {
+  const r = $('tipRows');
+  if (!r) return;
+
+  if (!marine) {
+    r.innerHTML = '<div class="tr"><span>Marine Data</span><b style="color:#94a3b8">unavailable</b></div>';
+    return;
+  }
+
+  let rows = '';
+  if (marine.sea_surface_temperature != null) {
+    rows += `<div class="tr"><span>SST</span><b style="color:var(--temp)">${Number(marine.sea_surface_temperature).toFixed(1)} °C</b></div>`;
+  }
+  if (marine.wave_height != null) {
+    rows += `<div class="tr"><span>Wave Height</span><b style="color:var(--wave)">${Number(marine.wave_height).toFixed(2)} m</b></div>`;
+  }
+  if (marine.ocean_current_velocity != null) {
+    rows += `<div class="tr"><span>Current</span><b style="color:var(--curr)">${Number(marine.ocean_current_velocity).toFixed(1)} km/h</b></div>`;
+  }
+
+  r.innerHTML = rows || '<div class="tr"><span>Marine Data</span><b style="color:#94a3b8">unavailable</b></div>';
+}
+
+async function processHoverLocation(lat, lon, reqId, signal) {
+  const latKey = lat.toFixed(3);
+  const lonKey = lon.toFixed(3);
+  const cacheKey = `${latKey},${lonKey}`;
+
+  // 1. Check cache first or reverse geocode
+  let loc = locationCache.get(cacheKey);
+  if (!loc) {
+    loc = await reverseGeocode(lat, lon, signal);
+  }
+
+  // Stale check
+  if (reqId !== hoverRequestId || interactionMode === 'search') return;
+
+  // 2. Update tooltip with location name immediately
+  renderHoverTip(loc, lat, lon);
+
+  // 3. Fetch marine data if ocean
+  if (!loc.isLand) {
+    const marineKey = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+    let marine = marineCache.get(marineKey);
+    if (!marine) {
+      try {
+        const la = lat.toFixed(4), lo = lon.toFixed(4);
+        const marineUrl = `https://marine-api.open-meteo.com/v1/marine?latitude=${la}&longitude=${lo}&current=wave_height,wave_direction,wave_period,sea_surface_temperature,ocean_current_velocity,ocean_current_direction`;
+        const res = await fetch(marineUrl, { signal });
+        if (res.ok) {
+          const data = await res.json();
+          marine = data.current || null;
+          marineCache.set(marineKey, marine);
+        }
+      } catch (e) {
+        if (e.name === 'AbortError') return;
+      }
+    }
+
+    if (reqId !== hoverRequestId || interactionMode === 'search') return;
+    renderHoverTipMarine(loc, lat, lon, marine);
+  }
+}
+
 let hoverTimer = null, lastLat = null, lastLon = null;
 
 if (viewer) {
@@ -1608,11 +1781,14 @@ if (viewer) {
   const container = $('cesiumContainer');
 
   handler.setInputAction(mv => {
-    positionTip(mv.endPosition.x, mv.endPosition.y);
-
-    const cart = viewer.camera.pickEllipsoid(mv.endPosition, viewer.scene.globe.ellipsoid);
-    if (!cart) {
-      clearTimeout(hoverTimer); abortActive(); hideTip();
+    const picked = pickGlobeCoordinates(mv.endPosition);
+    if (!picked) {
+      clearTimeout(hoverTimer);
+      if (hoverAbortController) {
+        hoverAbortController.abort();
+        hoverAbortController = null;
+      }
+      hideTip();
       if (container) container.classList.remove('over-globe');
       targetIndicator.show = false;
       if ($('hCoord')) $('hCoord').textContent = '— space —';
@@ -1622,14 +1798,10 @@ if (viewer) {
     }
 
     if (container) container.classList.add('over-globe');
-    const carto = Cesium.Cartographic.fromCartesian(cart);
-    const lon = Cesium.Math.toDegrees(carto.longitude);
-    const lat = Cesium.Math.toDegrees(carto.latitude);
+    const { cartesian, lat, lon } = picked;
 
-    targetIndicator.position = cart;
-    targetIndicator.show = true;
+    // Immediately update local coordinates (0ms)
     if ($('hCoord')) $('hCoord').textContent = fmtCoord(lat, lon);
-
     const statusCoord = $('statusCoord');
     if (statusCoord) {
       const latStr = Math.abs(lat).toFixed(4) + '° ' + (lat >= 0 ? 'N' : 'S');
@@ -1637,17 +1809,55 @@ if (viewer) {
       statusCoord.textContent = `LAT ${latStr}   LON ${lonStr}`;
     }
 
-    showTip();
-    clearTimeout(hoverTimer);
-    if (lastLat === null || Math.abs(lat - lastLat) > 0.2 || Math.abs(lon - lastLon) > 0.2) {
-      tipQuick(lat, lon);
-      if (!locked) renderLoading(lat, lon);
+    // SEARCH OVERRIDES HOVER:
+    // When SEARCH MODE is active, do NOT let hover replace the selected location!
+    // Do NOT reverse geocode hover coordinates.
+    // Do NOT fetch hover marine data.
+    // Do NOT replace the active location card.
+    if (interactionMode === 'search') {
+      return;
     }
+
+    targetIndicator.position = cartesian;
+    targetIndicator.show = true;
+    positionTip(mv.endPosition.x, mv.endPosition.y);
+    showTip();
+
+    // Fast cache check for 0ms display
+    const latKey = lat.toFixed(3);
+    const lonKey = lon.toFixed(3);
+    const cacheKey = `${latKey},${lonKey}`;
+
+    if (locationCache.has(cacheKey)) {
+      const cached = locationCache.get(cacheKey);
+      renderHoverTip(cached, lat, lon);
+      const marineKey = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+      if (marineCache.has(marineKey)) {
+        renderHoverTipMarine(cached, lat, lon, marineCache.get(marineKey));
+      }
+      return;
+    }
+
+    // Show immediate coordinates and fallback
+    tipQuick(lat, lon);
+
+    // Debounce reverse geocoding & marine data by 400ms
+    clearTimeout(hoverTimer);
+    if (hoverAbortController) {
+      hoverAbortController.abort();
+      hoverAbortController = null;
+    }
+
+    const currentReqId = ++hoverRequestId;
     hoverTimer = setTimeout(async () => {
       lastLat = lat; lastLon = lon;
-      await fetchSample(lat, lon);
-      if (lastSample) tipFromSample(lastSample);
-    }, 380);
+      hoverAbortController = new AbortController();
+      try {
+        await processHoverLocation(lat, lon, currentReqId, hoverAbortController.signal);
+      } catch (e) {
+        if (e.name !== 'AbortError') console.warn('Hover location resolution failed:', e);
+      }
+    }, 400);
   }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
   // Left click: Argo float selection or Location selection + Info Card
@@ -1659,25 +1869,23 @@ if (viewer) {
       return;
     }
 
-    const cart = viewer.camera.pickEllipsoid(click.position, viewer.scene.globe.ellipsoid);
-    if (!cart) return;
-    const carto = Cesium.Cartographic.fromCartesian(cart);
-    const lon = Cesium.Math.toDegrees(carto.longitude);
-    const lat = Cesium.Math.toDegrees(carto.latitude);
+    const picked = pickGlobeCoordinates(click.position);
+    if (!picked) return;
+    const { cartesian, lat, lon } = picked;
 
     // Visual highlight on globe
     if (locationHighlightIndicator && locationHighlightHalo) {
-      locationHighlightIndicator.position = cart;
-      locationHighlightHalo.position = cart;
+      locationHighlightIndicator.position = cartesian;
+      locationHighlightHalo.position = cartesian;
       locationHighlightIndicator.show = true;
       locationHighlightHalo.show = true;
     }
 
     locked = false;
-    lockIndicator.position = cart;
+    lockIndicator.position = cartesian;
     lockIndicator.show = true;
 
-    fetchSample(lat, lon).then(() => {
+    fetchSample(lat, lon, { updateInfoCard: true, isSearch: false }).then(() => {
       locked = true;
       setPill('lock', 'LOCKED');
       toast('Point sampled: ' + fmtCoord(lat, lon));
@@ -1689,7 +1897,13 @@ if (viewer) {
   }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
   viewer.scene.canvas.addEventListener('mouseleave', () => {
-    clearTimeout(hoverTimer); abortActive(); hideTip();
+    clearTimeout(hoverTimer);
+    if (hoverAbortController) {
+      hoverAbortController.abort();
+      hoverAbortController = null;
+    }
+    abortActive();
+    hideTip();
     if (container) container.classList.remove('over-globe');
     targetIndicator.show = false;
     const statusCoord = $('statusCoord');
@@ -1893,7 +2107,7 @@ function updateMapLegends() {
 /* ==================================================================
    8d. LOCATION INFORMATION POPUP CARD
    ================================================================== */
-function showLocationInfoCard(lat, lon, sample) {
+function showLocationInfoCard(lat, lon, sample, isSearch = false) {
   const card = $('locationInfoCard');
   if (!card) return;
 
@@ -1905,6 +2119,12 @@ function showLocationInfoCard(lat, lon, sample) {
   const stationEl = $('licStationId');
   const timeEl = $('licTimestamp');
   const badgeEl = $('licTypeBadge');
+  const clearBtn = $('btnLicClear');
+
+  if (clearBtn) {
+    clearBtn.style.display = isSearch ? 'block' : 'none';
+    clearBtn.onclick = clearSearch;
+  }
 
   const formattedCoord = fmtCoord(lat, lon);
   if (coordsEl) coordsEl.textContent = formattedCoord;
@@ -1929,14 +2149,15 @@ function showLocationInfoCard(lat, lon, sample) {
     const m = sample.marine || {}, a = sample.air || {};
     const sst = m.sea_surface_temperature != null ? Number(m.sea_surface_temperature).toFixed(1) : (sample.ocn ? sample.ocn.sst.toFixed(1) : '28.4');
 
-    if (nameEl) nameEl.textContent = sample.name || getOfflineOceanName(lat, lon);
-    if (regionEl) regionEl.textContent = sample.isLand ? (sample.geo?.country || 'Land Sector') : (sample.ocn ? sample.ocn.basin : getOfflineOceanName(lat, lon));
+    if (nameEl) nameEl.textContent = sample.name || (sample.isLand ? (sample.geo?.city || sample.geo?.landLocation || 'Terrestrial') : getOfflineOceanName(lat, lon));
+    if (regionEl) regionEl.textContent = sample.isLand ? (sample.geo?.state ? `${sample.geo.state}, ${sample.geo.country}` : (sample.geo?.country || 'Land Sector')) : (sample.ocn ? sample.ocn.basin : getOfflineOceanName(lat, lon));
     if (tempEl) tempEl.textContent = `${sst} °C`;
-    if (badgeEl) badgeEl.textContent = sample.isLand ? 'TERRESTRIAL POINT' : 'MARINE SECTOR';
+    if (badgeEl) badgeEl.textContent = isSearch ? 'SEARCH RESULT' : (sample.isLand ? 'TERRESTRIAL POINT' : 'MARINE SECTOR');
   } else {
     if (nameEl) nameEl.textContent = getOfflineOceanName(lat, lon);
     if (regionEl) regionEl.textContent = 'Global Marine Basin';
     if (tempEl) tempEl.textContent = '28.4 °C';
+    if (badgeEl) badgeEl.textContent = isSearch ? 'SEARCH RESULT' : 'LIVE SECTOR';
   }
 
   if (depthEl) depthEl.textContent = `${estDepth.toLocaleString()} m`;
@@ -1954,6 +2175,9 @@ function hideLocationInfoCard() {
   if (card) card.style.display = 'none';
   if (locationHighlightIndicator) locationHighlightIndicator.show = false;
   if (locationHighlightHalo) locationHighlightHalo.show = false;
+  if (interactionMode === 'search') {
+    clearSearch();
+  }
 }
 
 if ($('btnLicClose')) {
@@ -3160,16 +3384,260 @@ function initLayerControls() {
   }
 }
 
+
 /* ==================================================================
-   15. COORDINATE SEARCH & NAVIGATION SYSTEM (Prompt Modal)
+   15. SEARCH MODE & GEOLOCATION NAVIGATION SYSTEM
    ================================================================== */
 const KNOWN_LOCATIONS = [
-  { name: 'mumbai', lat: 18.9220, lon: 72.8347, label: 'Mumbai, India' },
-  { name: 'delhi', lat: 28.6139, lon: 77.2090, label: 'New Delhi, India' },
-  { name: 'chennai', lat: 13.0827, lon: 80.2707, label: 'Chennai, India' },
-  { name: 'mariana', lat: 11.3500, lon: 142.2000, label: 'Mariana Trench' },
-  { name: 'equator', lat: 0.0000, lon: 0.0000, label: 'Equator / Prime Meridian' }
+  { name: 'mumbai', lat: 18.9220, lon: 72.8347, label: 'Mumbai, India', type: 'city' },
+  { name: 'delhi', lat: 28.6139, lon: 77.2090, label: 'New Delhi, India', type: 'city' },
+  { name: 'chennai', lat: 13.0827, lon: 80.2707, label: 'Chennai, India', type: 'city' },
+  { name: 'mariana', lat: 11.3500, lon: 142.2000, label: 'Mariana Trench', type: 'water' },
+  { name: 'equator', lat: 0.0000, lon: 0.0000, label: 'Equator / Prime Meridian', type: 'water' }
 ];
+
+function findOceanByName(query) {
+  const q = query.toLowerCase().trim();
+  const oceans = [
+    { name: 'Arabian Sea', lat: 15.0, lon: 65.0, type: 'sea', display_name: 'Arabian Sea, Indian Ocean' },
+    { name: 'Bay of Bengal', lat: 14.0, lon: 88.0, type: 'sea', display_name: 'Bay of Bengal, Indian Ocean' },
+    { name: 'Indian Ocean', lat: -10.0, lon: 75.0, type: 'ocean', display_name: 'Indian Ocean' },
+    { name: 'Red Sea', lat: 21.0, lon: 38.0, type: 'sea', display_name: 'Red Sea' },
+    { name: 'Persian Gulf', lat: 26.5, lon: 52.0, type: 'sea', display_name: 'Persian Gulf' },
+    { name: 'Laccadive Sea', lat: 8.0, lon: 74.0, type: 'sea', display_name: 'Laccadive Sea, Indian Ocean' },
+    { name: 'Andaman Sea', lat: 10.0, lon: 95.0, type: 'sea', display_name: 'Andaman Sea, Indian Ocean' },
+    { name: 'Mediterranean Sea', lat: 35.0, lon: 18.0, type: 'sea', display_name: 'Mediterranean Sea' },
+    { name: 'South China Sea', lat: 12.0, lon: 114.0, type: 'sea', display_name: 'South China Sea' },
+    { name: 'North Atlantic Ocean', lat: 35.0, lon: -40.0, type: 'ocean', display_name: 'North Atlantic Ocean' },
+    { name: 'South Atlantic Ocean', lat: -25.0, lon: -20.0, type: 'ocean', display_name: 'South Atlantic Ocean' },
+    { name: 'North Pacific Ocean', lat: 35.0, lon: 170.0, type: 'ocean', display_name: 'North Pacific Ocean' },
+    { name: 'South Pacific Ocean', lat: -25.0, lon: -140.0, type: 'ocean', display_name: 'South Pacific Ocean' },
+    { name: 'Southern Ocean', lat: -65.0, lon: 0.0, type: 'ocean', display_name: 'Southern Ocean / Antarctic' },
+    { name: 'Arctic Ocean', lat: 80.0, lon: 0.0, type: 'ocean', display_name: 'Arctic Ocean' }
+  ];
+  return oceans.find(o => o.name.toLowerCase().includes(q) || q.includes(o.name.toLowerCase())) || null;
+}
+
+function clearSearch() {
+  interactionMode = 'hover';
+  selectedSearchResult = null;
+
+  if (searchTargetIndicator) searchTargetIndicator.show = false;
+  if (searchTargetHalo) searchTargetHalo.show = false;
+
+  const searchInput = $('ge-search-input');
+  if (searchInput) searchInput.value = '';
+
+  const clearBtn = $('btnSearchClear');
+  if (clearBtn) clearBtn.style.display = 'none';
+
+  const resultsDropdown = $('geSearchResults');
+  if (resultsDropdown) resultsDropdown.style.display = 'none';
+
+  const licClearBtn = $('btnLicClear');
+  if (licClearBtn) licClearBtn.style.display = 'none';
+
+  hideLocationInfoCard();
+  toast('Search cleared — Hover mode active');
+}
+
+function showSearchResults(results) {
+  const container = $('geSearchResults');
+  if (!container) return;
+
+  if (!results || results.length === 0) {
+    container.innerHTML = '<div class="ge-search-no-results" style="padding:10px 14px;color:#94a3b8;font-size:0.75rem;">No locations found</div>';
+    container.style.display = 'block';
+    return;
+  }
+
+  container.innerHTML = '';
+  results.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'ge-search-result-item';
+    div.setAttribute('role', 'option');
+    div.setAttribute('tabindex', '0');
+
+    const parts = (item.display_name || '').split(',');
+    const title = parts[0]?.trim() || 'Location';
+    const subtitle = parts.slice(1).join(',').trim();
+
+    div.innerHTML = `
+      <div class="ge-sr-title" style="font-weight:600;color:#f1f5f9;font-size:0.8rem;">${escapeHtml(title)}</div>
+      ${subtitle ? `<div class="ge-sr-subtitle" style="font-size:0.72rem;color:#94a3b8;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(subtitle)}</div>` : ''}
+    `;
+
+    const selectThis = () => {
+      selectSearchResult(item);
+      container.style.display = 'none';
+    };
+
+    div.onclick = selectThis;
+    div.onkeydown = e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        selectThis();
+      }
+    };
+    container.appendChild(div);
+  });
+
+  container.style.display = 'block';
+}
+
+function selectSearchResult(item) {
+  const lat = parseFloat(item.lat);
+  const lon = parseFloat(item.lon);
+  if (isNaN(lat) || isNaN(lon)) return;
+
+  const resultsDropdown = $('geSearchResults');
+  if (resultsDropdown) resultsDropdown.style.display = 'none';
+
+  const clearBtn = $('btnSearchClear');
+  if (clearBtn) clearBtn.style.display = 'flex';
+
+  const name = item.display_name ? item.display_name.split(',')[0].trim() : fmtCoord(lat, lon);
+  const searchInput = $('ge-search-input');
+  if (searchInput) searchInput.value = name;
+
+  // 1. Enter SEARCH MODE
+  interactionMode = 'search';
+  selectedSearchResult = {
+    lat,
+    lon,
+    item,
+    name,
+    displayName: item.display_name || name
+  };
+
+  // 2. Hide hover tip
+  hideTip();
+
+  // 3. Set subtle professional search target marker
+  if (searchTargetIndicator) {
+    const pos = Cesium.Cartesian3.fromDegrees(lon, lat, 0);
+    searchTargetIndicator.position = pos;
+    if (searchTargetIndicator.label) {
+      searchTargetIndicator.label.text = name.toUpperCase();
+    }
+    searchTargetIndicator.show = true;
+  }
+  if (searchTargetHalo) {
+    const pos = Cesium.Cartesian3.fromDegrees(lon, lat, 0);
+    searchTargetHalo.position = pos;
+    searchTargetHalo.show = true;
+  }
+
+  // 4. Determine camera altitude based on result type
+  let targetAltitude = 120000;
+  const type = (item.type || '').toLowerCase();
+  const itemClass = (item.class || '').toLowerCase();
+
+  if (type === 'country' || itemClass === 'country') {
+    targetAltitude = 2500000;
+  } else if (type === 'state' || type === 'province' || type === 'region' || itemClass === 'administrative') {
+    targetAltitude = 650000;
+  } else if (type === 'sea' || type === 'ocean' || type === 'bay' || type === 'gulf' || type === 'water') {
+    targetAltitude = 4500000;
+  } else if (type === 'city' || type === 'town' || type === 'municipality') {
+    targetAltitude = 900000;
+  } else if (item.boundingbox && item.boundingbox.length === 4) {
+    const latSpan = Math.abs(parseFloat(item.boundingbox[1]) - parseFloat(item.boundingbox[0]));
+    const lonSpan = Math.abs(parseFloat(item.boundingbox[3]) - parseFloat(item.boundingbox[2]));
+    const maxSpan = Math.max(latSpan, lonSpan);
+    targetAltitude = Math.max(50000, Math.min(8000000, maxSpan * 111000 * 1.5));
+  }
+
+  flyTo(lat, lon, targetAltitude, 2.2);
+
+  // 5. Fetch sample & display searched location's info card and panel
+  fetchSample(lat, lon, { isSearch: true, updateInfoCard: true, label: name });
+
+  toast(`Search Mode active: ${name}`);
+}
+
+async function searchLocation(query) {
+  if (!query || !query.trim()) return;
+  const q = query.trim();
+
+  // 1. Direct coordinate check: e.g. "19.076, 72.877"
+  const coordMatch = q.match(/^(-?\d+(\.\d+)?)[,\s/]+(-?\d+(\.\d+)?)$/);
+  if (coordMatch) {
+    const lat = parseFloat(coordMatch[1]);
+    const lon = parseFloat(coordMatch[3]);
+    if (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
+      selectSearchResult({
+        display_name: fmtCoord(lat, lon),
+        lat,
+        lon,
+        type: 'coordinate'
+      });
+      return;
+    }
+  }
+
+  // 2. Check offline ocean names
+  const oceanMatch = findOceanByName(q);
+  if (oceanMatch) {
+    selectSearchResult(oceanMatch);
+    return;
+  }
+
+  // 3. Known locations fast match
+  const qLower = q.toLowerCase();
+  const knownMatch = KNOWN_LOCATIONS.find(loc => qLower === loc.name || loc.name.includes(qLower));
+  if (knownMatch && KNOWN_LOCATIONS.filter(l => l.name.includes(qLower)).length === 1) {
+    selectSearchResult({
+      display_name: knownMatch.label,
+      lat: knownMatch.lat,
+      lon: knownMatch.lon,
+      type: knownMatch.type || 'city'
+    });
+    return;
+  }
+
+  // 4. Query Nominatim Search API
+  try {
+    toast(`Searching for "${q}"…`);
+    const searchUrl = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(q)}&limit=5&addressdetails=1`;
+    const res = await fetch(searchUrl, {
+      headers: { 'Accept': 'application/json' }
+    });
+    if (!res.ok) throw new Error('Search request failed: ' + res.status);
+    const results = await res.json();
+
+    if (!results || results.length === 0) {
+      toast(`Location not found: "${q}"`);
+      showSearchResults([]);
+      return;
+    }
+
+    if (results.length === 1) {
+      selectSearchResult(results[0]);
+    } else {
+      showSearchResults(results);
+    }
+  } catch (err) {
+    console.error('Search error:', err);
+    toast(`Search error: ${err.message || 'Unable to connect to search service'}`);
+  }
+}
+
+function navigateToCoordinates(lat, lon, label = '') {
+  if (!viewer) return;
+  autoRotate = false;
+  $('btnSpin')?.classList.remove('on');
+
+  const formatted = fmtCoord(lat, lon);
+  const displayLabel = label || formatted;
+
+  selectSearchResult({
+    display_name: displayLabel,
+    lat,
+    lon,
+    type: 'coordinate'
+  });
+}
 
 function openCoordModal(prefillLat = null, prefillLon = null) {
   const modal = $('coordModal');
@@ -3201,32 +3669,6 @@ function openCoordModal(prefillLat = null, prefillLon = null) {
 function closeCoordModal() {
   const modal = $('coordModal');
   if (modal) modal.style.display = 'none';
-}
-
-function navigateToCoordinates(lat, lon, label = '') {
-  if (!viewer) return;
-  autoRotate = false;
-  $('btnSpin')?.classList.remove('on');
-
-  const formatted = fmtCoord(lat, lon);
-  const displayLabel = label || formatted;
-
-  if ($('ge-search-input')) $('ge-search-input').value = displayLabel;
-
-  if (searchTargetIndicator && searchTargetHalo) {
-    const pos = Cesium.Cartesian3.fromDegrees(lon, lat, 0);
-    searchTargetIndicator.position = pos;
-    searchTargetHalo.position = pos;
-    if (searchTargetIndicator.label) {
-      searchTargetIndicator.label.text = `TARGET: ${displayLabel}`;
-    }
-    searchTargetIndicator.show = true;
-    searchTargetHalo.show = true;
-  }
-
-  flyTo(lat, lon, 350000, 2.2);
-  fetchSample(lat, lon);
-  toast('Navigating to ' + displayLabel);
 }
 
 function validateAndSubmitCoords() {
@@ -3270,7 +3712,19 @@ function validateAndSubmitCoords() {
 }
 
 if ($('btnSearchIcon')) $('btnSearchIcon').onclick = () => openCoordModal();
-if ($('btnSidebarSearchIcon')) $('btnSidebarSearchIcon').onclick = () => openCoordModal();
+if ($('btnSidebarSearchIcon')) {
+  $('btnSidebarSearchIcon').onclick = () => {
+    const q = $('ge-search-input')?.value.trim();
+    if (q) searchLocation(q);
+    else openCoordModal();
+  };
+}
+if ($('btnSearchClear')) {
+  $('btnSearchClear').onclick = clearSearch;
+}
+if ($('btnLicClear')) {
+  $('btnLicClear').onclick = clearSearch;
+}
 if ($('btnCloseCoordModal')) $('btnCloseCoordModal').onclick = closeCoordModal;
 if ($('btnCancelCoordModal')) $('btnCancelCoordModal').onclick = closeCoordModal;
 
@@ -3326,30 +3780,41 @@ window.addEventListener('keydown', e => {
   } else if (e.key === 'Escape' && isOpen) {
     e.preventDefault();
     closeCoordModal();
+  } else if (e.key === 'Escape') {
+    const resultsDropdown = $('geSearchResults');
+    if (resultsDropdown && resultsDropdown.style.display !== 'none') {
+      resultsDropdown.style.display = 'none';
+    }
   }
 }, true);
 
+// Close search dropdown on outside click
+document.addEventListener('click', e => {
+  const dropdown = $('geSearchResults');
+  if (dropdown && dropdown.style.display !== 'none') {
+    const searchBar = document.querySelector('.ge-search-bar');
+    if (!dropdown.contains(e.target) && (!searchBar || !searchBar.contains(e.target))) {
+      dropdown.style.display = 'none';
+    }
+  }
+});
+
 if ($('ge-search-input')) {
+  $('ge-search-input').oninput = e => {
+    const val = e.target.value.trim();
+    const clearBtn = $('btnSearchClear');
+    if (clearBtn) clearBtn.style.display = val ? 'flex' : 'none';
+  };
+
   $('ge-search-input').onkeydown = e => {
     if (e.key === 'Enter') {
+      e.preventDefault();
       const q = e.target.value.trim();
-      if (!q) { openCoordModal(); return; }
-      const coordMatch = q.match(/^(-?\d+(\.\d+)?)[,\s/]+(-?\d+(\.\d+)?)$/);
-      if (coordMatch) {
-        const lat = parseFloat(coordMatch[1]);
-        const lon = parseFloat(coordMatch[3]);
-        if (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
-          navigateToCoordinates(lat, lon);
-          return;
-        }
-      }
-      const qLower = q.toLowerCase();
-      const matchLoc = KNOWN_LOCATIONS.find(loc => qLower.includes(loc.name) || loc.name.includes(qLower));
-      if (matchLoc) {
-        navigateToCoordinates(matchLoc.lat, matchLoc.lon, matchLoc.label);
+      if (!q) {
+        openCoordModal();
         return;
       }
-      openCoordModal();
+      searchLocation(q);
     }
   };
 }
