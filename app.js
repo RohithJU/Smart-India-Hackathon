@@ -2450,215 +2450,50 @@ if ($('ge-search-input')) {
 }
 
 /* ==================================================================
-   12. TEMPORAL & DEPTH OBSERVATION CONTROLS
+   12. DEPTH OBSERVATION CONTROL
    ================================================================== */
-let currentObservationDepth = 0;
+let currentObservationDepth = 1000;
 let isTimelinePlaying = false;
 let timelinePlaybackTimer = null;
 let timelineSpeed = 1;
 
-/* ── Depth Zones & Adaptive Settings (Inspired by AdaptiveSlider) ── */
-function getDepthSettings(depth) {
-  const pct = Math.max(0, Math.min(100, (depth / 6000) * 100));
+const depthWidget = $('floatingDepthWidget');
+const depthInput = $('depthRange');
+const depthNum = $('fDepthNum');
 
-  if (depth === 0) {
-    return {
-      tag: 'SURFACE',
-      zoneName: 'Surface Layer · Air-Sea Boundary (0m)',
-      color: '#10B981',
-      bg: 'rgba(16, 185, 129, 0.14)',
-      border: 'rgba(16, 185, 129, 0.35)',
-      gradient: 'linear-gradient(to right, #10B981, #34D399)',
-      thumbBorder: '#10B981',
-      pct
-    };
-  } else if (depth <= 200) {
-    return {
-      tag: 'EPIPELAGIC',
-      zoneName: 'Epipelagic · Sunlight Zone (0–200m)',
-      color: '#10B981',
-      bg: 'rgba(16, 185, 129, 0.14)',
-      border: 'rgba(16, 185, 129, 0.35)',
-      gradient: 'linear-gradient(to right, #10B981, #7DD3FC)',
-      thumbBorder: '#10B981',
-      pct
-    };
-  } else if (depth <= 1000) {
-    return {
-      tag: 'MESOPELAGIC',
-      zoneName: 'Mesopelagic · Twilight Zone (200–1,000m)',
-      color: '#7DD3FC',
-      bg: 'rgba(125, 211, 252, 0.14)',
-      border: 'rgba(125, 211, 252, 0.35)',
-      gradient: 'linear-gradient(to right, #7DD3FC, #FEB101)',
-      thumbBorder: '#7DD3FC',
-      pct
-    };
-  } else if (depth <= 4000) {
-    return {
-      tag: 'BATHYPELAGIC',
-      zoneName: 'Bathypelagic · Midnight Zone (1,000–4,000m)',
-      color: '#FE55B7',
-      bg: 'rgba(254, 85, 183, 0.14)',
-      border: 'rgba(254, 85, 183, 0.35)',
-      gradient: 'linear-gradient(to right, #FEB101, #FE55B7)',
-      thumbBorder: '#FE55B7',
-      pct
-    };
-  } else {
-    return {
-      tag: 'ABYSSOPELAGIC',
-      zoneName: 'Abyssopelagic · Abyssal Plain (4,000–6,000m)',
-      color: '#C58AF9',
-      bg: 'rgba(197, 138, 249, 0.14)',
-      border: 'rgba(197, 138, 249, 0.35)',
-      gradient: 'linear-gradient(to right, #FE55B7, #4946FF)',
-      thumbBorder: '#4946FF',
-      pct
-    };
+function updateDepthValue(val) {
+  const depth = Math.max(0, Math.min(6000, Number(val) || 0));
+  currentObservationDepth = depth;
+  if (depthNum) {
+    depthNum.textContent = depth;
   }
 }
 
-function updateDepthWidgetDisplay() {
-  const depth = currentObservationDepth;
-  const cfg = getDepthSettings(depth);
-
-  // Large numeric readout
-  const numEl = $('fDepthNum');
-  if (numEl) {
-    numEl.textContent = depth.toLocaleString();
-  }
-
-  // Tag badge
-  const tagEl = $('fDepthTag');
-  if (tagEl) {
-    tagEl.textContent = cfg.tag;
-    tagEl.style.color = cfg.color;
-    tagEl.style.background = cfg.bg;
-    tagEl.style.borderColor = cfg.border;
-  }
-
-  // Progress Bar & Thumb
-  const progEl = $('fDepthProgress');
-  if (progEl) {
-    progEl.style.width = `calc(10px + (${cfg.pct} / 100) * (100% - 20px))`;
-    progEl.style.background = cfg.gradient;
-  }
-
-  const thumbEl = $('fDepthThumb');
-  if (thumbEl) {
-    thumbEl.style.left = `calc(10px + (${cfg.pct} / 100) * (100% - 20px))`;
-    thumbEl.style.borderColor = cfg.thumbBorder;
-  }
-
-  // Zone description & Data Availability
-  const zoneEl = $('fDepthZone');
-  if (zoneEl) {
-    if (lastSample && lastSample.isLand) {
-      zoneEl.innerHTML = `${cfg.zoneName} · <span style="color:#F28B82">No data available (Land coordinate)</span>`;
-    } else if (lastSample && !lastSample.isLand && !lastSample.ocn) {
-      zoneEl.innerHTML = `${cfg.zoneName} · <span style="color:#F28B82">No data available at depth</span>`;
-    } else {
-      zoneEl.textContent = cfg.zoneName;
-    }
-  }
-
-  // Synchronize sidebar badge if present
-  const badge = $('depthValBadge');
-  if (badge) {
-    badge.textContent = depth === 0 ? '0 m (Surface)' : `-${depth.toLocaleString()} m`;
-  }
-
-  // Presets in floating widget & sidebar
-  document.querySelectorAll('.f-depth-preset-btn').forEach(btn => {
-    const d = Number(btn.getAttribute('data-depth'));
-    btn.classList.toggle('active', d === depth);
+if (depthInput) {
+  // Update depth immediately whenever the slider moves (drag or keyboard)
+  depthInput.addEventListener('input', e => {
+    updateDepthValue(e.target.value);
   });
-  document.querySelectorAll('.depth-btn').forEach(btn => {
-    const d = Number(btn.getAttribute('data-depth'));
-    btn.classList.toggle('active', d === depth);
+
+  depthInput.addEventListener('change', e => {
+    updateDepthValue(e.target.value);
   });
 }
 
-function setObservationDepth(depthMeters, updateSlider = true) {
-  currentObservationDepth = Math.max(0, Math.min(6000, Number(depthMeters) || 0));
-
-  if (updateSlider && $('depthRange')) {
-    $('depthRange').value = currentObservationDepth;
-  }
-
-  updateDepthWidgetDisplay();
-
-  // If a marine station is active, re-render the whole salinity / T-S stack
-  if (lastSample && !lastSample.isLand) {
-    if (!lastSample.ocn) attachOceanography(lastSample);
-    const wasLocked = locked;
-    locked = false;
-    renderSample(lastSample);
-    locked = wasLocked;
-    updateHUDFromSample(lastSample);
-  }
+// Stop Cesium globe camera movement when interacting with depth widget
+if (depthWidget) {
+  const stopEvent = e => e.stopPropagation();
+  depthWidget.addEventListener('mousedown', stopEvent);
+  depthWidget.addEventListener('pointerdown', stopEvent);
+  depthWidget.addEventListener('touchstart', stopEvent, { passive: true });
+  depthWidget.addEventListener('wheel', stopEvent);
+  depthWidget.addEventListener('dblclick', stopEvent);
 }
 
-// Persistent Floating Depth Slider Listener & Direct Pointer Dragging
-const depthTrackContainer = $('fDepthTrackContainer');
-const depthRangeInput = $('depthRange');
-let isDraggingDepth = false;
-
-function updateDepthFromPointerEvent(e) {
-  if (!depthTrackContainer) return;
-  const rect = depthTrackContainer.getBoundingClientRect();
-  const clientX = e.clientX !== undefined ? e.clientX : (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
-  const x = Math.max(0, Math.min(rect.width, clientX - rect.left));
-  const pct = rect.width > 0 ? (x / rect.width) : 0;
-  const rawDepth = Math.round((pct * 6000) / 25) * 25;
-  setObservationDepth(rawDepth, true);
+// Initialize on boot
+if (depthInput) {
+  updateDepthValue(depthInput.value);
 }
-
-if (depthTrackContainer) {
-  depthTrackContainer.addEventListener('pointerdown', e => {
-    isDraggingDepth = true;
-    try { depthTrackContainer.setPointerCapture(e.pointerId); } catch (_) { }
-    updateDepthFromPointerEvent(e);
-  });
-  depthTrackContainer.addEventListener('pointermove', e => {
-    if (isDraggingDepth) {
-      updateDepthFromPointerEvent(e);
-    }
-  });
-  const finishDrag = e => {
-    if (isDraggingDepth) {
-      isDraggingDepth = false;
-      try { depthTrackContainer.releasePointerCapture(e.pointerId); } catch (_) { }
-      const val = currentObservationDepth;
-      toast(`Global observation depth: ${val === 0 ? 'Surface (0m)' : '-' + val.toLocaleString() + 'm'}`);
-    }
-  };
-  depthTrackContainer.addEventListener('pointerup', finishDrag);
-  depthTrackContainer.addEventListener('pointercancel', finishDrag);
-}
-
-if (depthRangeInput) {
-  depthRangeInput.addEventListener('input', e => {
-    setObservationDepth(e.target.value, false);
-  });
-  depthRangeInput.addEventListener('change', e => {
-    const val = Number(e.target.value);
-    toast(`Global observation depth: ${val === 0 ? 'Surface (0m)' : '-' + val.toLocaleString() + 'm'}`);
-  });
-}
-
-// Depth Preset Buttons (Floating Widget & Sidebar)
-document.querySelectorAll('.f-depth-preset-btn, .depth-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const d = Number(btn.getAttribute('data-depth'));
-    setObservationDepth(d, true);
-    toast(`Observation depth: ${d === 0 ? 'Surface (0m)' : '-' + d.toLocaleString() + 'm'}`);
-  });
-});
-
-// Initialize floating depth widget state on boot
-updateDepthWidgetDisplay();
 
 // Play / Pause Timeline
 function toggleTimelinePlayback() {

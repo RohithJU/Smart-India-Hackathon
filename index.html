@@ -977,67 +977,22 @@
     </div>
   </div>
 
-  <!-- ================= PERSISTENT FLOATING DEPTH SLIDER (Always Visible Over Globe) ================= -->
-  <div id="floatingDepthWidget" class="floating-depth-widget" role="region"
-    aria-label="Global Observation Depth Control">
+  <!-- ================= PERSISTENT FLOATING DEPTH SLIDER ================= -->
+  <div id="floatingDepthWidget" class="floating-depth-widget" role="region" aria-label="Ocean depth control">
     <div class="f-depth-header">
-      <div class="f-depth-title-group">
-        <span class="f-depth-label">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
-            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 2v16" />
-            <path d="m7 13 5 5 5-5" />
-            <path d="M3 21h18" />
-          </svg>
-          <span>DEPTH</span>
-        </span>
-        <div class="f-depth-value-wrap">
-          <span class="f-depth-num" id="fDepthNum">0</span>
-          <span class="f-depth-unit">m</span>
-          <span class="f-depth-tag" id="fDepthTag">SURFACE</span>
-        </div>
-      </div>
-
-      <!-- Quick Depth Presets -->
-      <div class="f-depth-presets" role="group" aria-label="Quick depth presets">
-        <button type="button" class="f-depth-preset-btn active" data-depth="0">0m</button>
-        <button type="button" class="f-depth-preset-btn" data-depth="200">-200m</button>
-        <button type="button" class="f-depth-preset-btn" data-depth="1000">-1km</button>
-        <button type="button" class="f-depth-preset-btn" data-depth="4000">-4km</button>
+      <span class="f-depth-label">DEPTH</span>
+      <div class="f-depth-value-wrap">
+        <span class="f-depth-num" id="fDepthNum">1000</span>
+        <span class="f-depth-unit">m</span>
       </div>
     </div>
-
-    <!-- Adaptive Slider Track (Inspired by AdaptiveSlider) -->
-    <div class="f-depth-track-container" id="fDepthTrackContainer" title="Drag or click to adjust observation depth">
-      <!-- Background tick dots -->
-      <div class="f-depth-dots" aria-hidden="true">
-        <span class="f-dot"></span>
-        <span class="f-dot"></span>
-        <span class="f-dot"></span>
-        <span class="f-dot"></span>
-        <span class="f-dot"></span>
-        <span class="f-dot"></span>
-        <span class="f-dot"></span>
-      </div>
-
-      <!-- Adaptive Gradient Fill -->
-      <div class="f-depth-progress" id="fDepthProgress" style="width: 0%;"></div>
-
-      <!-- Native Range Input for seamless dragging/touch -->
-      <input type="range" id="depthRange" min="0" max="6000" step="25" value="0"
-        aria-label="Global observation depth in meters" class="f-depth-input" />
-
-      <!-- Glowing Custom Thumb -->
-      <div class="f-depth-thumb" id="fDepthThumb" style="left: 0%;">
-        <div class="f-thumb-core"></div>
-      </div>
+    <div class="f-depth-slider-wrap">
+      <input type="range" id="depthRange" min="0" max="6000" step="50" value="1000"
+        aria-label="Ocean depth" class="f-depth-range" />
     </div>
-
-    <!-- Scale & Zone Readout -->
     <div class="f-depth-scale-row">
-      <span class="f-scale-tick">0m</span>
-      <span class="f-depth-zone" id="fDepthZone">Epipelagic · Sunlight Zone (0–200m)</span>
-      <span class="f-scale-tick">6,000m</span>
+      <span>0 m</span>
+      <span>6000 m</span>
     </div>
   </div>
 
