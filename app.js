@@ -3183,7 +3183,7 @@ if ($('btnProfCopy')) {
 /* ==================================================================
    13. DEPTH OBSERVATION CONTROL
    ================================================================== */
-let currentObservationDepth = 1000;
+let currentObservationDepth = 0;
 let isTimelinePlaying = false;
 let timelinePlaybackTimer = null;
 let timelineSpeed = 1;
@@ -3193,7 +3193,7 @@ const depthInput = $('depthRange');
 const depthNum = $('fDepthNum');
 
 function updateDepthValue(val) {
-  const depth = Math.max(0, Math.min(6000, Number(val) || 0));
+  const depth = Math.max(0, Math.min(3000, Number(val) || 0));
   currentObservationDepth = depth;
   if (depthNum) depthNum.textContent = depth;
   if ($('depthValBadge')) $('depthValBadge').textContent = `${depth} m`;
@@ -3211,6 +3211,9 @@ function updateDepthValue(val) {
 }
 
 if (depthInput) {
+  depthInput.min = '0';
+  depthInput.max = '3000';
+  depthInput.step = '10';
   depthInput.addEventListener('input', e => {
     updateDepthValue(e.target.value);
   });
@@ -3239,7 +3242,7 @@ if (depthWidget) {
 
 // Initialize on boot
 if (depthInput) {
-  updateDepthValue(depthInput.value);
+  updateDepthValue(depthInput.value || 0);
 }
 
 // Play / Pause Timeline
