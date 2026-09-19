@@ -13,12 +13,12 @@
     href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
     rel="stylesheet">
 
-  <!-- CesiumJS 1.125 Stable -->
-  <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.125/Build/Cesium/Widgets/widgets.css" />
+  <!-- CesiumJS 1.130 Stable -->
+  <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Widgets/widgets.css" />
   <script>
-    window.CESIUM_BASE_URL = 'https://cesium.com/downloads/cesiumjs/releases/1.125/Build/Cesium/';
+    window.CESIUM_BASE_URL = 'https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/';
   </script>
-  <script src="https://cesium.com/downloads/cesiumjs/releases/1.125/Build/Cesium/Cesium.js"></script>
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.130/Build/Cesium/Cesium.js"></script>
 
   <!-- Modular Stylesheet -->
   <link rel="stylesheet" href="style.css" />
@@ -135,9 +135,31 @@
     <div class="clock"><b id="utcClock">--:--:--</b> UTC<br><span id="localClock"
         style="font-size:.66rem;color:var(--text-secondary)">local --:--</span></div>
 
+    <div class="topbar-sep"></div>
+    <!-- View Mode Switcher: Globe Exploration vs Deep Ocean Data Profile -->
+    <div class="view-mode-toggle" role="group" aria-label="View mode">
+      <button type="button" class="view-mode-btn active" id="btnModeGlobe" title="3D Globe Exploration">
+        <span class="mode-icon">◉</span>
+        <span>Globe View</span>
+      </button>
+      <button type="button" class="view-mode-btn" id="btnModeProfile" title="Scientific Deep Ocean Telemetry">
+        <span class="mode-icon">○</span>
+        <span>Data Profile</span>
+      </button>
+    </div>
+
     <div class="topbar-spacer"></div>
 
     <div class="topbar-actions">
+      <!-- Single Search Icon Button (Opens Coordinate Dialog) -->
+      <button class="tbar-btn" id="btnSearchIcon" type="button" aria-label="Search coordinates"
+        title="Search Coordinates (F)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+      </button>
       <!-- Re-focus / Center Globe -->
       <button class="tbar-btn on" id="btnCenter" type="button" aria-label="Center globe" title="Centre globe (C)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -161,6 +183,16 @@
           <circle cx="12" cy="12" r="7" stroke-dasharray="3 3" />
         </svg>
         <span id="topLocLabel" style="display:none">My Location</span>
+      </button>
+
+      <!-- Borders, Places & Locations Toggle Button (Google Earth style) -->
+      <button class="tbar-btn on" id="btnToggleLabels" type="button" aria-label="Toggle borders and labels"
+        title="Borders & Labels (L)" aria-pressed="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+          <circle cx="12" cy="10" r="3" />
+        </svg>
       </button>
 
       <!-- Measurement Tool Placeholder -->
@@ -223,11 +255,14 @@
       <!-- 1. SEARCH -->
       <div class="ge-sidebar-section ge-search-section">
         <div class="ge-search-bar">
-          <svg class="ge-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="11" cy="11" r="8"></circle>
-            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-          </svg>
+          <button type="button" class="ge-search-icon-btn" id="btnSidebarSearchIcon" aria-label="Enter coordinates"
+            title="Click to enter Latitude &amp; Longitude in separate boxes">
+            <svg class="ge-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+          </button>
           <input type="text" id="ge-search-input" placeholder="Search marine coordinate or station…"
             aria-label="Search marine coordinate or station" autocomplete="off" />
         </div>
@@ -298,6 +333,17 @@
         <div class="ge-section-header">
           <span class="ge-section-title">Scene &amp; Atmosphere</span>
           <span class="ge-section-badge">Rendering</span>
+        </div>
+        <div class="toggle-row" data-toggle="labels" id="rowLabels">
+          <span class="toggle-label-with-icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+              <circle cx="12" cy="10" r="3" />
+            </svg>
+            <span>Borders &amp; Labels</span>
+          </span>
+          <div class="switch on" id="swLabels" role="switch" aria-checked="true" tabindex="0"></div>
         </div>
         <div class="toggle-row" data-toggle="myLoc">
           <span class="toggle-label-with-icon">
@@ -426,13 +472,15 @@
           <span class="ge-section-badge">Observation</span>
         </div>
 
-        <!-- Depth Slice Control -->
+        <!-- Depth Slice Readout in Sidebar -->
         <div class="temporal-subgroup">
           <div class="temporal-label-row">
             <span class="temporal-label">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+                <path d="M12 2v16" />
+                <path d="m7 13 5 5 5-5" />
+                <path d="M3 21h18" />
               </svg>
               <span>Depth Slice</span>
             </span>
@@ -444,15 +492,8 @@
             <button type="button" class="depth-btn" data-depth="1000">-1000m</button>
             <button type="button" class="depth-btn" data-depth="4000">-4000m</button>
           </div>
-          <div class="depth-slider-wrap">
-            <input type="range" id="depthRange" min="0" max="6000" step="50" value="0"
-              aria-label="Observation depth in meters">
-            <div class="depth-scale-ticks">
-              <span>0m</span>
-              <span>2000m</span>
-              <span>4000m</span>
-              <span>6000m</span>
-            </div>
+          <div class="temporal-status-note">
+            <span>Primary control: Persistent floating slider over globe</span>
           </div>
         </div>
 
@@ -578,6 +619,280 @@
     </div>
   </aside>
 
+  <!-- ================= RIGHT-SIDE OCEAN PROFILE PANEL ================= -->
+  <aside id="oceanProfilePanel" class="ocean-profile-panel collapsed" aria-label="Marine Intelligence Ocean Profile">
+    <!-- Edge Toggle Button (Mirrors Left Sidebar) -->
+    <button id="oceanProfileToggle" type="button" aria-label="Toggle ocean profile panel" aria-expanded="false"
+      title="Toggle Ocean Profile Panel (P)">
+      <svg class="icon-prof-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+        stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+      </svg>
+      <svg class="icon-prof-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+        stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+
+    <!-- Scrollable Profile Body -->
+    <div class="ocean-profile-scroll">
+
+      <!-- 1. STATION HEADER -->
+      <div class="prof-header">
+        <div class="prof-header-top">
+          <div class="prof-station-meta">
+            <span class="prof-station-badge" id="profPlatformBadge">ARGO PROFILER</span>
+            <h2 class="prof-station-id" id="profStationId">ARGO-45821</h2>
+          </div>
+          <div class="prof-header-actions">
+            <span class="live-stream-badge"><span class="pulse-dot"></span>ACTIVE</span>
+            <button type="button" class="prof-close-btn" id="btnProfClose" title="Collapse Panel">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="prof-coord-row">
+          <div class="prof-coord-chip">
+            <small>Position</small>
+            <b id="profCoords">15.4200° N, 72.8400° E</b>
+          </div>
+          <div class="prof-coord-chip">
+            <small>Basin &amp; Water Mass</small>
+            <b id="profWaterMass">Arabian Sea High-Salinity Water</b>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. SUBNAV TABS -->
+      <div class="prof-tabs-bar" role="tablist">
+        <button type="button" class="prof-tab-btn active" data-tab="overview">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7" />
+            <rect x="14" y="3" width="7" height="7" />
+            <rect x="14" y="14" width="7" height="7" />
+            <rect x="3" y="14" width="7" height="7" />
+          </svg>
+          <span>Snapshot</span>
+        </button>
+        <button type="button" class="prof-tab-btn" data-tab="graph">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 3v18h18" />
+            <path d="m19 9-5 5-4-4-3 3" />
+          </svg>
+          <span>Depth Graph</span>
+        </button>
+        <button type="button" class="prof-tab-btn" data-tab="column">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+          </svg>
+          <span>Thermal Column</span>
+        </button>
+        <button type="button" class="prof-tab-btn" data-tab="compare">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M16 3h5v5" />
+            <path d="M4 20L21 3" />
+            <path d="M21 16v5h-5" />
+            <path d="M15 15l6 6" />
+            <path d="M4 4l5 5" />
+          </svg>
+          <span>Compare</span>
+        </button>
+      </div>
+
+      <!-- 3. TAB CONTENT 1: OVERVIEW & SNAPSHOT -->
+      <div class="prof-tab-pane active" id="paneOverview">
+        <!-- Ocean Snapshot Card -->
+        <div class="prof-card">
+          <div class="prof-card-head">
+            <span class="prof-card-title">Ocean Telemetry Snapshot</span>
+            <span class="prof-badge-pill">0–2000m CTD</span>
+          </div>
+          <div class="prof-metric-grid" id="profSnapshotGrid">
+            <!-- Rendered by JS: Surface Temp, Deep Temp (2000m), Depth Range, Thermal Gradient ΔT, Salinity, Pressure -->
+          </div>
+        </div>
+
+        <!-- Thermal Gradient Indicator (ΔT) with Spectrum Gauge -->
+        <div class="prof-card">
+          <div class="prof-card-head">
+            <span class="prof-card-title">Thermal Gradient (ΔT: 0m → 2000m)</span>
+            <b class="prof-gradient-delta" id="profGradientVal">-- °C</b>
+          </div>
+          <div class="thermal-gradient-container">
+            <div class="thermal-gradient-bar">
+              <div class="thermal-gauge-pin" id="thermalGaugePin" style="left: 50%;"></div>
+            </div>
+            <div class="thermal-spectrum-labels">
+              <span class="spec-polar">Polar (&lt;4°C)</span>
+              <span class="spec-temp">Temperate</span>
+              <span class="spec-trop">Tropical</span>
+              <span class="spec-ext">Extreme (&gt;22°C)</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Thermocline Detection Card -->
+        <div class="prof-card">
+          <div class="prof-card-head">
+            <span class="prof-card-title">Thermocline Layer Detection</span>
+            <span class="prof-badge-pill" id="thermoclineStatusBadge">Stratified</span>
+          </div>
+          <div class="thermocline-grid">
+            <div class="therm-box">
+              <small>Upper Boundary</small>
+              <b id="thermTop">-- m</b>
+            </div>
+            <div class="therm-box">
+              <small>Lower Boundary</small>
+              <b id="thermBottom">-- m</b>
+            </div>
+            <div class="therm-box">
+              <small>Layer Temp Drop</small>
+              <b class="c-temp" id="thermDrop">-- °C</b>
+            </div>
+            <div class="therm-box">
+              <small>Peak Gradient</small>
+              <b class="c-alt" id="thermGrad">-- °C/m</b>
+            </div>
+          </div>
+          <div class="thermocline-note" id="thermNote">
+            <span>Analyzing vertical stratification...</span>
+          </div>
+        </div>
+
+        <!-- Temperature Anomaly Card -->
+        <div class="prof-card">
+          <div class="prof-card-head">
+            <span class="prof-card-title">Depth-Level Anomaly vs Baseline</span>
+            <span class="prof-badge-pill">WOA / Climatology</span>
+          </div>
+          <div class="anomaly-grid" id="profAnomalyGrid">
+            <!-- Rendered by JS: Surface, 100m, 500m, 2000m anomalies with trend arrows -->
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. TAB CONTENT 2: SCIENTIFIC GRAPH -->
+      <div class="prof-tab-pane" id="paneGraph">
+        <div class="prof-card">
+          <!-- Parameter Switcher -->
+          <div class="param-switcher" role="group" aria-label="Graph parameter">
+            <button type="button" class="param-btn active" data-param="temp">
+              <span>Temperature (°C)</span>
+            </button>
+            <button type="button" class="param-btn" data-param="sal">
+              <span>Salinity (PSU)</span>
+            </button>
+            <button type="button" class="param-btn" data-param="pres">
+              <span>Pressure (bar)</span>
+            </button>
+          </div>
+
+          <!-- Inverted Depth Profile Chart (0m Top down to 2000m Bottom) -->
+          <div class="scientific-chart-container" id="scientificChartContainer">
+            <!-- Dynamic Inline SVG rendered by JS with inverted Y-axis, thermocline band, hover probe reticle -->
+          </div>
+
+          <!-- Probe Telemetry Readout -->
+          <div class="probe-readout" id="probeReadout">
+            <span class="probe-dot"></span>
+            <span id="probeText">Hover cursor over graph to probe telemetry at any depth</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. TAB CONTENT 3: THERMAL COLUMN -->
+      <div class="prof-tab-pane" id="paneColumn">
+        <div class="prof-card">
+          <div class="prof-card-head">
+            <span class="prof-card-title">Vertical Thermal Water Column</span>
+            <span class="prof-badge-pill">Epipelagic → Bathypelagic</span>
+          </div>
+          <p class="prof-card-desc">
+            Continuous temperature-salinity stratification down to 2,000 meters depth.
+          </p>
+          <div class="thermal-column-wrapper" id="thermalColumnWrapper">
+            <!-- Dynamic vertical column segments rendered by JS -->
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. TAB CONTENT 4: LOCATION COMPARISON -->
+      <div class="prof-tab-pane" id="paneCompare">
+        <div class="prof-card">
+          <div class="prof-card-head">
+            <span class="prof-card-title">Dual Station Ocean Contrast</span>
+            <span class="prof-badge-pill">Comparative Analysis</span>
+          </div>
+
+          <div class="compare-selector-row">
+            <div class="compare-station-col">
+              <label>Station A (Current)</label>
+              <div class="compare-chip primary" id="cmpStationAName">Current Station</div>
+            </div>
+            <div class="compare-vs">VS</div>
+            <div class="compare-station-col">
+              <label for="cmpStationBSel">Station B (Contrast)</label>
+              <select class="compare-select" id="cmpStationBSel" aria-label="Select comparison station">
+                <option value="bay_of_bengal">Bay of Bengal (Northern Basin)</option>
+                <option value="arabian_sea">Arabian Sea (High Salinity)</option>
+                <option value="southern_ocean">Southern Ocean (Antarctic Polar)</option>
+                <option value="red_sea">Red Sea (Hypersaline Trench)</option>
+                <option value="mariana">Mariana Deep Basin</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Comparison Metrics Table -->
+          <div class="compare-table-wrapper" id="compareTableWrapper">
+            <!-- Rendered by JS: Side-by-side metrics -->
+          </div>
+
+          <!-- Dual Curve Inset Graph -->
+          <div class="compare-chart-container" id="compareChartContainer">
+            <!-- Dual polyline SVG comparison rendered by JS -->
+          </div>
+        </div>
+      </div>
+
+      <!-- 7. FOOTER ACTIONS -->
+      <div class="prof-footer">
+        <div class="prof-footer-actions">
+          <button class="prof-action-btn" id="btnProfLock" type="button" title="Lock active station profile">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+            <span>Lock</span>
+          </button>
+          <button class="prof-action-btn" id="btnProfFly" type="button" title="Fly camera to this station">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="3 11 22 2 13 21 11 13 3 11" />
+            </svg>
+            <span>Fly here</span>
+          </button>
+          <button class="prof-action-btn" id="btnProfCopy" type="button" title="Copy CTD scientific telemetry report">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+            <span>Copy CTD</span>
+          </button>
+        </div>
+        <div class="prof-argo-status" id="profArgoStatus">
+          <span>ARGO Global Array · WMO Core Profiler · Next cycle in 48h</span>
+        </div>
+      </div>
+
+    </div>
+  </aside>
+
   <!-- ================= RIGHT CONTROL DOCK ================= -->
   <div class="dock glass" role="toolbar" aria-label="Camera and view controls">
     <div class="dock-group">
@@ -662,6 +977,70 @@
     </div>
   </div>
 
+  <!-- ================= PERSISTENT FLOATING DEPTH SLIDER (Always Visible Over Globe) ================= -->
+  <div id="floatingDepthWidget" class="floating-depth-widget" role="region"
+    aria-label="Global Observation Depth Control">
+    <div class="f-depth-header">
+      <div class="f-depth-title-group">
+        <span class="f-depth-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 2v16" />
+            <path d="m7 13 5 5 5-5" />
+            <path d="M3 21h18" />
+          </svg>
+          <span>DEPTH</span>
+        </span>
+        <div class="f-depth-value-wrap">
+          <span class="f-depth-num" id="fDepthNum">0</span>
+          <span class="f-depth-unit">m</span>
+          <span class="f-depth-tag" id="fDepthTag">SURFACE</span>
+        </div>
+      </div>
+
+      <!-- Quick Depth Presets -->
+      <div class="f-depth-presets" role="group" aria-label="Quick depth presets">
+        <button type="button" class="f-depth-preset-btn active" data-depth="0">0m</button>
+        <button type="button" class="f-depth-preset-btn" data-depth="200">-200m</button>
+        <button type="button" class="f-depth-preset-btn" data-depth="1000">-1km</button>
+        <button type="button" class="f-depth-preset-btn" data-depth="4000">-4km</button>
+      </div>
+    </div>
+
+    <!-- Adaptive Slider Track (Inspired by AdaptiveSlider) -->
+    <div class="f-depth-track-container" id="fDepthTrackContainer" title="Drag or click to adjust observation depth">
+      <!-- Background tick dots -->
+      <div class="f-depth-dots" aria-hidden="true">
+        <span class="f-dot"></span>
+        <span class="f-dot"></span>
+        <span class="f-dot"></span>
+        <span class="f-dot"></span>
+        <span class="f-dot"></span>
+        <span class="f-dot"></span>
+        <span class="f-dot"></span>
+      </div>
+
+      <!-- Adaptive Gradient Fill -->
+      <div class="f-depth-progress" id="fDepthProgress" style="width: 0%;"></div>
+
+      <!-- Native Range Input for seamless dragging/touch -->
+      <input type="range" id="depthRange" min="0" max="6000" step="25" value="0"
+        aria-label="Global observation depth in meters" class="f-depth-input" />
+
+      <!-- Glowing Custom Thumb -->
+      <div class="f-depth-thumb" id="fDepthThumb" style="left: 0%;">
+        <div class="f-thumb-core"></div>
+      </div>
+    </div>
+
+    <!-- Scale & Zone Readout -->
+    <div class="f-depth-scale-row">
+      <span class="f-scale-tick">0m</span>
+      <span class="f-depth-zone" id="fDepthZone">Epipelagic · Sunlight Zone (0–200m)</span>
+      <span class="f-scale-tick">6,000m</span>
+    </div>
+  </div>
+
   <!-- ================= BOTTOM TELEMETRY HUD ================= -->
   <div class="hud glass" id="hud" aria-live="polite">
     <div class="hud-cell">
@@ -713,6 +1092,24 @@
           <path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2" />
         </svg> Wind</small>
       <b class="c-wind" id="hSpeed">--</b>
+    </div>
+    <div class="hud-cell">
+      <small><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 2.7 6.4 8.3a8 8 0 1 0 11.3 0z" />
+          <path d="M8.5 14h7" />
+          <path d="M10 17h4" />
+        </svg> Salinity</small>
+      <b class="c-sal" id="hSal">--</b>
+    </div>
+    <div class="hud-cell">
+      <small><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="3" y1="7" x2="21" y2="7" />
+          <line x1="3" y1="12" x2="21" y2="12" />
+          <line x1="3" y1="17" x2="21" y2="17" />
+        </svg> Density σθ</small>
+      <b class="c-curr" id="hDensity">--</b>
     </div>
     <div class="hud-cell">
       <small><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -772,6 +1169,129 @@
     <div class="tn" id="tipName">—</div>
     <div id="tipRows"></div>
     <div class="th">Pause to sample · click to lock</div>
+  </div>
+
+  <!-- ================= GEOSPATIAL COORDINATE PROMPT DIALOG ================= -->
+  <div id="coordModal" class="dlg-backdrop" role="dialog" aria-modal="true" aria-labelledby="dlgTitle"
+    style="display: none;">
+
+    <!-- BG Overlay with Luxury Glow Effects (From Sample Code) -->
+    <div class="dlg-overlay-bg" id="dlgOverlayBg">
+      <div class="dlg-glow-blob" aria-hidden="true"></div>
+      <div class="dlg-radial-vignette" aria-hidden="true"></div>
+    </div>
+
+    <!-- Modal Container: rounded-[32px] border-[6px] sm:border-[10px] border-[#232323] bg-[#131313]/90 backdrop-blur-2xl -->
+    <div class="dlg-card" id="dlgCard">
+      <!-- Header -->
+      <div class="dlg-header">
+        <div>
+          <h2 id="dlgTitle" class="dlg-title">Navigate to coordinates</h2>
+          <p class="dlg-subtitle">
+            Enter exact latitude and longitude in the separate boxes below to fly to any location on Earth.
+          </p>
+        </div>
+        <button type="button" class="dlg-close-btn" id="btnCloseCoordModal" title="Close (Esc)"
+          aria-label="Close dialog">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Input Section -->
+      <form id="coordSearchForm" class="dlg-form" onsubmit="return false;">
+        <div class="dlg-form-body">
+
+          <!-- Box 1: Latitude -->
+          <div class="dlg-field-block" id="boxCoordLat">
+            <div class="dlg-label-row">
+              <label for="inputCoordLat" class="dlg-label">Box 1: Latitude</label>
+              <span class="dlg-range-badge">-90.0000° to +90.0000° (N / S)</span>
+            </div>
+            <div class="dlg-input-group">
+              <input type="number" step="any" min="-90" max="90" id="inputCoordLat" class="dlg-input font-mono"
+                placeholder="e.g. 19.0760" required autocomplete="off" />
+            </div>
+            <div class="dlg-field-meta">
+              <span class="dlg-field-hint">Positive (+) for North, negative (&minus;) for South</span>
+              <span class="dlg-field-error" id="errCoordLat" aria-live="polite"></span>
+            </div>
+          </div>
+
+          <!-- Box 2: Longitude -->
+          <div class="dlg-field-block" id="boxCoordLon">
+            <div class="dlg-label-row">
+              <label for="inputCoordLon" class="dlg-label">Box 2: Longitude</label>
+              <span class="dlg-range-badge">-180.0000° to +180.0000° (E / W)</span>
+            </div>
+            <div class="dlg-input-group">
+              <input type="number" step="any" min="-180" max="180" id="inputCoordLon" class="dlg-input font-mono"
+                placeholder="e.g. 72.8777" required autocomplete="off" />
+            </div>
+            <div class="dlg-field-meta">
+              <span class="dlg-field-hint">Positive (+) for East, negative (&minus;) for West</span>
+              <span class="dlg-field-error" id="errCoordLon" aria-live="polite"></span>
+            </div>
+          </div>
+
+          <!-- Quick Presets Tabs (From Sample Code Pricing Tabs) -->
+          <div class="dlg-tabs-section">
+            <label class="dlg-label">Quick Locations</label>
+            <div class="dlg-tabs-bar" role="tablist">
+              <button type="button" class="dlg-tab-btn" data-lat="18.9220" data-lon="72.8347" data-name="Mumbai">
+                MUMBAI
+              </button>
+              <button type="button" class="dlg-tab-btn" data-lat="28.6139" data-lon="77.2090" data-name="New Delhi">
+                NEW DELHI
+              </button>
+              <button type="button" class="dlg-tab-btn" data-lat="13.0827" data-lon="80.2707" data-name="Chennai">
+                CHENNAI
+              </button>
+              <button type="button" class="dlg-tab-btn" data-lat="11.3500" data-lon="142.2000"
+                data-name="Mariana Trench">
+                MARIANA
+              </button>
+            </div>
+          </div>
+
+          <!-- Toggle Section (From Sample Code Toggle Section) -->
+          <div class="dlg-toggle-card">
+            <div class="dlg-toggle-info">
+              <span class="dlg-toggle-label">Sync Current Camera Viewport</span>
+              <span class="dlg-info-badge" title="Fill Box 1 and Box 2 with current camera position">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="12" y1="16" x2="12" y2="12"></line>
+                  <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                </svg>
+              </span>
+            </div>
+            <button type="button" class="dlg-toggle-switch" id="btnSyncCurrentCam" role="switch" aria-checked="false"
+              title="Sync current camera coordinates">
+              <div class="dlg-switch-knob"></div>
+            </button>
+          </div>
+
+          <p class="dlg-footnote">
+            Geospatial coordinates support decimal degrees with high-precision Cesium 3D flight.
+          </p>
+        </div>
+
+        <!-- Footer Buttons (From Sample Code Footer Buttons) -->
+        <div class="dlg-footer">
+          <button type="button" class="dlg-btn-cancel" id="btnCancelCoordModal">
+            Cancel
+          </button>
+          <button type="submit" class="dlg-btn-submit" id="btnSubmitCoord">
+            Fly to Coordinates
+          </button>
+        </div>
+      </form>
+    </div>
   </div>
 
   <div id="toast"></div>
