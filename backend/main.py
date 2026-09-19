@@ -53,9 +53,9 @@ def predict_temperature(
     wind_speed:float,
     salinity:float
 ):
-    if depth<0:
-        return{
-            "error":"Depth cannot be negative"
+    if depth < 0 or depth > 3000:
+        return {
+            "error": "Depth must be between 0 and 3000 m"
         }
 
     # Reference synthetic ocean profile

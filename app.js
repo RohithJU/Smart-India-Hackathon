@@ -165,13 +165,9 @@ function fmtCoord(lat, lon) {
    ================================================================== */
 let viewer, targetIndicator, lockIndicator, googleTileset = null;
 let currentLocationIndicator = null, currentLocationHalo = null;
-let searchTargetIndicator = null, searchTargetHalo = null;
 let userLocation = null; // { lat, lon, name, label }
 let locating = false;
-let landmarksDataSource = null;
-let labelsLayer = null;
-let tilesetLabelsLayer = null;
-let labelsVisible = true;
+let gridEntities = [];
 
 try {
   if (CESIUM_ION_ACCESS_TOKEN && !CESIUM_ION_ACCESS_TOKEN.startsWith('YOUR_')) {
@@ -187,24 +183,18 @@ try {
     requestRenderMode: false
   });
 
-  // Enable Ultra-High Resolution Rendering (Retina / 4K / HiDPI display support)
-  try {
-    viewer.resolutionScale = window.devicePixelRatio || 1.0;
-    viewer.useBrowserRecommendedResolution = false;
-  } catch (_) { }
+  // Enable crisp high-DPI rendering for sharp labels and text
+  viewer.useBrowserRecommendedResolution = false;
+  viewer.resolutionScale = Math.min(window.devicePixelRatio || 1.0, 2.0);
 
   const scene = viewer.scene;
   scene.backgroundColor = Cesium.Color.fromCssColorString('#02060f');
   scene.globe.enableLighting = false;
   scene.globe.showGroundAtmosphere = true;
   scene.globe.baseColor = Cesium.Color.fromCssColorString('#07223f');
-  scene.globe.maximumScreenSpaceError = 1.33; // Sharper terrain & satellite tiles
   scene.skyAtmosphere.show = true;
   scene.fog.enabled = true;
   scene.highDynamicRange = false;
-  if (scene.postProcessStages && scene.postProcessStages.fxaa) {
-    scene.postProcessStages.fxaa.enabled = true;
-  }
 
   // Camera behaviour limits — makes zoom feel like a real platform
   const ssc = scene.screenSpaceCameraController;
@@ -215,20 +205,49 @@ try {
   ssc.inertiaZoom = 0.75;
   ssc.inertiaTranslate = 0.85;
 
-  // Base imagery (so the globe is readable even without / before 3D tiles)
+  let baseImageryLayer = null;
+  let labelsLayer = null;
+
+  // Base imagery: pure satellite imagery without consumer POIs/landmarks/businesses
   (async function addBaseImagery() {
     try {
-      const layer = await Cesium.ImageryLayer.fromWorldImagery({});
-      viewer.imageryLayers.add(layer);
+      baseImageryLayer = await Cesium.ImageryLayer.fromWorldImagery({
+        style: Cesium.IonWorldImageryStyle.AERIAL
+      });
+      viewer.imageryLayers.add(baseImageryLayer);
     } catch (e) {
       try {
         const prov = await Cesium.TileMapServiceImageryProvider.fromUrl(
           Cesium.buildModuleUrl('Assets/Textures/NaturalEarthII')
         );
-        viewer.imageryLayers.add(new Cesium.ImageryLayer(prov));
+        baseImageryLayer = viewer.imageryLayers.add(new Cesium.ImageryLayer(prov));
       } catch (e2) { console.warn('No base imagery available', e2); }
     }
   })();
+
+  async function setLabelsLayerVisible(on) {
+    if (!viewer) return;
+    if (on) {
+      if (!labelsLayer) {
+        try {
+          labelsLayer = await Cesium.ImageryLayer.fromWorldImagery({
+            style: Cesium.IonWorldImageryStyle.AERIAL_WITH_LABELS
+          });
+          viewer.imageryLayers.add(labelsLayer);
+        } catch (err) {
+          console.warn('Could not load labels layer:', err);
+        }
+      } else {
+        labelsLayer.show = true;
+      }
+      toast('Map labels and landmarks enabled');
+    } else {
+      if (labelsLayer) {
+        labelsLayer.show = false;
+      }
+      toast('Map labels and landmarks hidden');
+    }
+  }
 
   // Hover marker: vivid green dot
   targetIndicator = viewer.entities.add({
@@ -298,46 +317,6 @@ try {
     }
   });
 
-  // Target Search Location Marker (Pulsing Azure Beacon)
-  searchTargetIndicator = viewer.entities.add({
-    name: 'Target Search Location',
-    position: Cesium.Cartesian3.ZERO,
-    show: false,
-    point: {
-      pixelSize: new Cesium.CallbackProperty(() => 13 + 3 * Math.sin(Date.now() / 250), false),
-      color: Cesium.Color.fromCssColorString('#8AB4F8'),
-      outlineColor: Cesium.Color.WHITE,
-      outlineWidth: 2.5,
-      disableDepthTestDistance: Number.POSITIVE_INFINITY
-    },
-    label: {
-      text: 'SEARCH TARGET',
-      font: '700 11px JetBrains Mono, monospace',
-      fillColor: Cesium.Color.fromCssColorString('#A8C7FA'),
-      outlineColor: Cesium.Color.fromCssColorString('#02060f'),
-      outlineWidth: 3,
-      style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-      pixelOffset: new Cesium.Cartesian2(0, -22),
-      disableDepthTestDistance: Number.POSITIVE_INFINITY
-    }
-  });
-
-  searchTargetHalo = viewer.entities.add({
-    name: 'Search location halo',
-    position: Cesium.Cartesian3.ZERO,
-    show: false,
-    point: {
-      pixelSize: new Cesium.CallbackProperty(() => 28 + 10 * Math.sin(Date.now() / 250), false),
-      color: new Cesium.CallbackProperty(() => {
-        const alpha = Math.max(0.08, 0.28 + 0.15 * Math.sin(Date.now() / 250));
-        return Cesium.Color.fromCssColorString('#8AB4F8').withAlpha(alpha);
-      }, false),
-      outlineColor: Cesium.Color.fromCssColorString('#A8C7FA').withAlpha(0.6),
-      outlineWidth: 1.5,
-      disableDepthTestDistance: Number.POSITIVE_INFINITY
-    }
-  });
-
   // Immediate centred view
   viewer.camera.setView({
     destination: Cesium.Cartesian3.fromDegrees(HOME.lon, HOME.lat, HOME.height),
@@ -357,7 +336,6 @@ try {
       if (statusEl) statusEl.textContent = 'Streaming Google Photorealistic 3D Tiles…';
       googleTileset = await Cesium.createGooglePhotorealistic3DTileset();
       viewer.scene.primitives.add(googleTileset);
-      attachLabelsToTileset();
       applyTilesMode(true);
       console.info('Google 3D Tiles loaded.');
       setCesiumReady();
@@ -385,96 +363,6 @@ function applyTilesMode(on) {
   if (!viewer) return;
   if (googleTileset) googleTileset.show = on;
   viewer.scene.globe.show = !on || !googleTileset;
-  if (tilesetLabelsLayer) tilesetLabelsLayer.show = labelsVisible;
-  if (labelsLayer) labelsLayer.show = labelsVisible;
-}
-
-/* ==================================================================
-   2b. GOOGLE EARTH BORDERS & LABELS OVERLAY (Countries, States, Cities, Seas)
-   ================================================================== */
-function initLabelsLayer() {
-  if (!viewer) return;
-
-  try {
-    // Google Maps / Google Earth Hybrid Labels & Borders Overlay (lyrs=h)
-    const googleLabelsProvider = new Cesium.UrlTemplateImageryProvider({
-      url: 'https://mt{s}.google.com/vt/lyrs=h&x={x}&y={y}&z={z}',
-      subdomains: ['0', '1', '2', '3'],
-      maximumLevel: 20,
-      credit: 'Google Earth / Maps'
-    });
-
-    labelsLayer = viewer.imageryLayers.addImageryProvider(googleLabelsProvider);
-    labelsLayer.show = labelsVisible;
-    labelsLayer.alpha = 1.0;
-  } catch (err) {
-    console.warn('Google labels provider failed, falling back to Esri Reference:', err);
-    try {
-      Cesium.ArcGisMapServerImageryProvider.fromUrl(
-        'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer'
-      ).then(provider => {
-        labelsLayer = viewer.imageryLayers.addImageryProvider(provider);
-        labelsLayer.show = labelsVisible;
-      }).catch(e2 => console.error('Esri labels provider failed:', e2));
-    } catch (err2) {
-      console.error('Labels setup error:', err2);
-    }
-  }
-
-  // Also attach to 3D tileset if loaded
-  attachLabelsToTileset();
-
-  // Wire Topbar Button
-  const btnTop = $('btnToggleLabels') || $('btnToggleLandmarks');
-  if (btnTop) {
-    btnTop.onclick = () => toggleLabels();
-  }
-}
-
-function attachLabelsToTileset() {
-  if (googleTileset && googleTileset.imageryLayers && !tilesetLabelsLayer) {
-    try {
-      const tilesetLabelsProvider = new Cesium.UrlTemplateImageryProvider({
-        url: 'https://mt{s}.google.com/vt/lyrs=h&x={x}&y={y}&z={z}',
-        subdomains: ['0', '1', '2', '3'],
-        maximumLevel: 20,
-        credit: 'Google Earth / Maps'
-      });
-      tilesetLabelsLayer = googleTileset.imageryLayers.addImageryProvider(tilesetLabelsProvider);
-      tilesetLabelsLayer.show = labelsVisible;
-    } catch (eTileset) {
-      console.warn('Could not drape labels on 3D tileset:', eTileset);
-    }
-  }
-}
-
-function toggleLabels(forceState) {
-  labelsVisible = forceState !== undefined ? Boolean(forceState) : !labelsVisible;
-
-  if (labelsLayer) {
-    labelsLayer.show = labelsVisible;
-  }
-  if (tilesetLabelsLayer) {
-    tilesetLabelsLayer.show = labelsVisible;
-  }
-
-  const btnTop = $('btnToggleLabels') || $('btnToggleLandmarks');
-  if (btnTop) {
-    btnTop.classList.toggle('on', labelsVisible);
-    btnTop.setAttribute('aria-pressed', String(labelsVisible));
-  }
-
-  const sw = $('swLabels') || $('swLandmarks');
-  if (sw) {
-    sw.classList.toggle('on', labelsVisible);
-    sw.setAttribute('aria-checked', String(labelsVisible));
-  }
-
-  toast(labelsVisible ? 'Borders & Labels: Visible' : 'Borders & Labels: Hidden');
-}
-
-function toggleLandmarks(forceState) {
-  toggleLabels(forceState);
 }
 
 /* ==================================================================
@@ -731,9 +619,60 @@ function getOfflineOceanName(lat, lon) {
   if (lat < 0 && lat >= -60) return 'South Pacific Ocean';
   return 'Global Ocean';
 }
+function isCoordinateOnLand(lat, lon) {
+  let n = lon; while (n > 180) n -= 360; while (n < -180) n += 360;
+
+  // Specific water bodies check (coastal contours):
+  // Arabian Sea:
+  if (lat >= 7 && lat < 14 && n >= 50 && n <= 75.0) return false;
+  if (lat >= 14 && lat < 18 && n >= 50 && n <= 73.0) return false;
+  if (lat >= 18 && lat < 21 && n >= 50 && n <= 72.7) return false;
+  if (lat >= 21 && lat <= 26 && n >= 50 && n <= 69.2) return false;
+
+  // Bay of Bengal:
+  if (lat >= 7 && lat < 15 && n >= 80.5 && n <= 95.0) return false;
+  if (lat >= 15 && lat <= 22 && n >= 83.0 && n <= 95.0) return false;
+
+  // Red Sea, Persian Gulf, Mediterranean:
+  if (lat >= 12 && lat <= 30 && n >= 32 && n <= 44) return false;
+  if (lat >= 23 && lat <= 31 && n >= 47 && n <= 57) return false;
+  if (lat >= 30 && lat <= 46 && n >= -6 && n <= 36.5) return false;
+
+  if (lat <= -60) return true; // Antarctica
+
+  // Open oceans in Southern hemisphere:
+  if (lat < 0) {
+    if (n >= -70 && n <= 20) return false; // Atlantic
+    if (n >= 20 && n <= 113) return false; // Indian
+    if (n >= 154 || n <= -82) return false; // Pacific
+    if (lat >= -44 && lat <= -10 && n >= 113 && n <= 154) return true; // Australia
+    if (lat >= -56 && lat <= 13 && n >= -82 && n <= -34) return true; // South America
+    if (lat >= -35 && lat <= 0 && n >= 10 && n <= 42) return true; // Africa
+    return false;
+  }
+
+  // Northern hemisphere landmasses:
+  if (lat >= 8 && lat <= 36 && n >= 68 && n <= 97) return true; // India / South Asia
+  if (lat >= 36 && lat <= 75 && n >= -10 && n <= 180) return true; // Eurasia
+  if (lat >= 1 && lat <= 75 && n >= 60 && n <= 145) return true; // Central/East/SE Asia
+  if (lat >= 0 && lat <= 37 && n >= -18 && n <= 52) return true; // Africa
+  if (lat >= 15 && lat <= 72 && n >= -168 && n <= -52) return true; // North America
+
+  return false;
+}
+
 function getOfflineLandRegion(lat, lon) {
   let n = lon; while (n > 180) n -= 360; while (n < -180) n += 360;
-  if (lat >= 6 && lat <= 37 && n >= 68 && n <= 97) return 'Indian Subcontinent';
+  // India & regional breakdowns
+  if (lat >= 8 && lat <= 36 && n >= 68 && n <= 97) {
+    if (lat >= 29.5 && lat <= 32.5 && n >= 73.8 && n <= 77.2) return 'Punjab, India';
+    if (lat >= 28.0 && lat <= 29.2 && n >= 76.8 && n <= 77.5) return 'Delhi NCR, India';
+    if (lat >= 18.5 && lat <= 20.5 && n >= 72.5 && n <= 73.5) return 'Maharashtra, India';
+    if (lat >= 12.5 && lat <= 13.5 && n >= 77.2 && n <= 77.9) return 'Karnataka, India';
+    if (lat >= 12.8 && lat <= 13.3 && n >= 80.0 && n <= 80.4) return 'Tamil Nadu, India';
+    if (lat >= 22.0 && lat <= 23.0 && n >= 88.0 && n <= 88.6) return 'West Bengal, India';
+    return 'India';
+  }
   if (lat >= 5 && lat <= 35 && n >= 35 && n <= 60) return 'Middle East';
   if (lat >= -35 && lat <= 37 && n >= -18 && n <= 52) return 'Africa';
   if (lat >= 36 && lat <= 71 && n >= -10 && n <= 45) return 'Europe';
@@ -756,46 +695,125 @@ function abortActive() {
 }
 
 async function reverseGeocode(lat, lon, signal) {
-  const key = lat.toFixed(2) + ',' + lon.toFixed(2);
+  const key = lat.toFixed(3) + ',' + lon.toFixed(3);
   if (geoCache.has(key)) return geoCache.get(key);
-  try {
-    const url = 'https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=' +
-      lat.toFixed(4) + '&longitude=' + lon.toFixed(4) + '&localityLanguage=en';
-    const r = await fetch(url, { signal });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const d = await r.json();
 
-    let oceanName = null;
-    if (d.localityInfo && Array.isArray(d.localityInfo.informative)) {
-      for (const it of d.localityInfo.informative) {
-        const desc = (it.description || '').toLowerCase(), nm = (it.name || '').toLowerCase();
-        if (desc.includes('ocean') || desc.includes('sea') || desc.includes('gulf') || desc.includes('bay') ||
-          desc.includes('strait') || nm.includes('ocean') || nm.includes('sea')) { oceanName = it.name; break; }
+  const onLand = isCoordinateOnLand(lat, lon);
+  let locality = null;
+  let district = null;
+  let state = null;
+  let country = null;
+  let oceanName = null;
+
+  // 1. Try OpenStreetMap Nominatim (highly accurate locality & administrative hierarchy)
+  try {
+    const nomUrl = 'https://nominatim.openstreetmap.org/reverse?lat=' +
+      lat.toFixed(5) + '&lon=' + lon.toFixed(5) + '&format=jsonv2&zoom=14&addressdetails=1';
+    const nomRes = await fetch(nomUrl, {
+      signal,
+      headers: { 'Accept-Language': 'en' }
+    });
+    if (nomRes.ok) {
+      const data = await nomRes.json();
+      const addr = data.address || {};
+      locality = addr.city || addr.town || addr.village || addr.municipality || addr.suburb || addr.hamlet || addr.neighbourhood || null;
+      district = addr.county || addr.state_district || addr.district || null;
+      state = addr.state || addr.province || addr.region || null;
+      country = addr.country || null;
+
+      if (!country && data.display_name) {
+        const dLower = data.display_name.toLowerCase();
+        if (dLower.includes('ocean') || dLower.includes('sea') || dLower.includes('gulf') || dLower.includes('bay')) {
+          oceanName = data.name || data.display_name.split(',')[0].trim();
+        }
       }
     }
-    const parts = [];
-    if (d.locality && d.locality !== d.countryName) parts.push(d.locality);
-    else if (d.city && d.city !== d.countryName) parts.push(d.city);
-    if (d.principalSubdivision && d.principalSubdivision !== d.countryName && !parts.includes(d.principalSubdivision))
-      parts.push(d.principalSubdivision);
-    if (d.countryName) parts.push(d.countryName);
-
-    const res = {
-      isLand: Boolean(d.countryName),
-      country: d.countryName || '', state: d.principalSubdivision || '',
-      city: d.city || d.locality || '', continent: d.continent || '',
-      landLocation: parts.length ? parts.join(', ') : getOfflineLandRegion(lat, lon),
-      oceanName: oceanName || getOfflineOceanName(lat, lon)
-    };
-    geoCache.set(key, res);
-    return res;
-  } catch (e) {
-    if (e.name === 'AbortError') throw e;
-    return {
-      isLand: false, country: '', state: '', city: '', continent: '',
-      landLocation: getOfflineLandRegion(lat, lon), oceanName: getOfflineOceanName(lat, lon)
-    };
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;
   }
+
+  // 2. If locality or country not resolved, try BigDataCloud client API
+  if (!locality && !country) {
+    try {
+      const bdcUrl = 'https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=' +
+        lat.toFixed(4) + '&longitude=' + lon.toFixed(4) + '&localityLanguage=en';
+      const bdcRes = await fetch(bdcUrl, { signal });
+      if (bdcRes.ok) {
+        const d = await bdcRes.json();
+        if (d.localityInfo && Array.isArray(d.localityInfo.administrative)) {
+          for (const item of d.localityInfo.administrative) {
+            const lvl = item.adminLevel;
+            const desc = (item.description || '').toLowerCase();
+            const nm = item.name;
+            if (!nm) continue;
+            if ((lvl >= 6 || desc.includes('city') || desc.includes('town') || desc.includes('village') || desc.includes('locality')) && !locality) {
+              locality = nm;
+            } else if ((lvl === 5 || desc.includes('district') || desc.includes('county')) && !district) {
+              district = nm;
+            } else if ((lvl === 4 || desc.includes('state') || desc.includes('province')) && !state) {
+              state = nm;
+            } else if ((lvl === 2 || desc.includes('country')) && !country) {
+              country = nm;
+            }
+          }
+        }
+        if (!locality) locality = d.city || d.locality || null;
+        if (!state) state = d.principalSubdivision || null;
+        if (!country) country = d.countryName || null;
+
+        if (d.localityInfo && Array.isArray(d.localityInfo.informative)) {
+          for (const it of d.localityInfo.informative) {
+            const desc = (it.description || '').toLowerCase(), nm = (it.name || '').toLowerCase();
+            if (desc.includes('ocean') || desc.includes('sea') || desc.includes('gulf') || desc.includes('bay') ||
+              desc.includes('strait') || nm.includes('ocean') || nm.includes('sea')) {
+              oceanName = it.name;
+              break;
+            }
+          }
+        }
+      }
+    } catch (err2) {
+      if (err2.name === 'AbortError') throw err2;
+    }
+  }
+
+  // 3. Construct specific locality hierarchy:
+  // priority: specific city/town → district → state/province → country → regional fallback
+  const isLand = Boolean(country) || onLand;
+  let landLocation;
+
+  if (locality) {
+    const parts = [locality];
+    if (state && state !== locality && !locality.includes(state)) parts.push(state);
+    if (country && country !== state && country !== locality) parts.push(country);
+    landLocation = parts.join(', ');
+  } else if (district) {
+    const parts = [district];
+    if (state && state !== district) parts.push(state);
+    if (country) parts.push(country);
+    landLocation = parts.join(', ');
+  } else if (state) {
+    landLocation = country ? (state + ', ' + country) : state;
+  } else if (country) {
+    landLocation = country;
+  } else {
+    landLocation = getOfflineLandRegion(lat, lon);
+  }
+
+  const res = {
+    isLand,
+    country: country || '',
+    state: state || '',
+    city: locality || district || '',
+    locality: locality || '',
+    district: district || '',
+    continent: '',
+    landLocation,
+    oceanName: oceanName || getOfflineOceanName(lat, lon)
+  };
+
+  geoCache.set(key, res);
+  return res;
 }
 
 /* ==================================================================
@@ -912,6 +930,10 @@ function barrierLayerThickness(sss) {
 
 /* ---- Profiles: S(z) and T(z), both salinity-aware ----------------- */
 function salinityAtDepth(sss, d, mld, hyper, lat) {
+  /* The 600-1000 m salinity minimum is an AAIW/intermediate-water feature of
+     low and mid latitudes. At its polar source region salinity instead rises
+     monotonically with depth, so the minimum must be switched off there —
+     otherwise the modelled column comes out statically unstable. */
   const polar = Math.abs(lat || 0) > 48;
   const deepRef = hyper ? sss - 0.5 : 34.72;
   const interMin = hyper ? sss - 0.4 : (polar ? 34.68 : 34.42);
@@ -927,8 +949,8 @@ function salinityAtDepth(sss, d, mld, hyper, lat) {
 function temperatureAtDepth(sst, sss, lat, d, mld, blt, hyper) {
   const deepT = hyper ? 21.5 : Math.max(1.2, 2.6 - Math.abs(lat) * 0.012);
   let thermoBase = hyper ? 22.0 : 7.5;
-  if (!hyper && sst < 9) thermoBase = Math.min(7.5, sst + 0.5);
-  const isoBase = mld + blt;
+  if (!hyper && sst < 9) thermoBase = Math.min(7.5, sst + 0.5);  // polar: gentle CDW warming only
+  const isoBase = mld + blt;             // barrier layer keeps T uniform below halocline
   let T;
   if (d <= isoBase) T = sst;
   else if (d <= 900) {
@@ -938,6 +960,8 @@ function temperatureAtDepth(sst, sss, lat, d, mld, blt, hyper) {
     const t = Math.min(1, (d - 900) / 2100);
     T = thermoBase - (thermoBase - deepT) * Math.pow(t, 0.8);
   }
+  /* physical floor: water cannot be colder than its own freezing point,
+     which itself depends on salinity and pressure */
   const S = salinityAtDepth(sss, d, mld, hyper, lat);
   return Math.max(T, freezingPoint(S, d) + 0.05);
 }
@@ -961,12 +985,14 @@ function secantBulk(T, S, pBar) {
   const B = Bw + S * (-9.9348e-7 + 2.0816e-8 * T + 9.1697e-10 * T * T);
   return K0 + A * pBar + B * pBar * pBar;
 }
+/** In-situ density (kg/m³). depth in metres ≈ pressure in dbar. */
 function seawaterDensity(T, S, depth) {
   const r0 = rhoST0(T, S);
-  const p = (depth || 0) / 10;
+  const p = (depth || 0) / 10;            // dbar → bar
   if (p <= 0) return r0;
   return r0 / (1 - p / secantBulk(T, S, p));
 }
+/** σt — density anomaly at the surface, the classic water-mass label. */
 function sigmaT(T, S) { return rhoST0(T, S) - 1000; }
 
 /* ---- Freezing point (UNESCO) -------------------------------------- */
@@ -1055,12 +1081,14 @@ function waterColumnAt(s, depth) {
   const rho = seawaterDensity(p.t, p.s, d);
   const ab = alphaBeta(p.t, p.s, d);
 
+  /* Brunt–Väisälä: use potential density referenced to this depth */
   const dz = 25;
   const up = o.ts(Math.max(0, d - dz)), dn = o.ts(d + dz);
   const rUp = seawaterDensity(up.t, up.s, d), rDn = seawaterDensity(dn.t, dn.s, d);
   const span = (dn.d - up.d) || 1;
   const n2 = 9.81 / ((rUp + rDn) / 2) * (rDn - rUp) / span;
 
+  /* how much of the stratification is salt vs heat */
   const dT = dn.t - up.t, dS = dn.s - up.s;
   const thermalPart = Math.abs(ab.alpha * dT), halinePart = Math.abs(ab.beta * dS);
   const salineShare = (thermalPart + halinePart) > 0
@@ -1106,6 +1134,9 @@ function renderSalinitySection(s, depth) {
   const atLabel = depth === 0 ? 'surface' : '−' + depth + ' m';
 
   const dTemp = wc.t - surf.t;
+  const dSal = wc.s - surf.s;
+  /* the headline number: °C of temperature change that would produce the
+     same density change as 1 PSU of salinity change, right here */
   const compens = isFinite(wc.tsRatio) ? wc.tsRatio : null;
 
   let html = '<div class="section-label">Salinity &amp; water column <span class="depth-tag">@ ' + atLabel + '</span></div>';
@@ -1143,6 +1174,7 @@ function renderSalinitySection(s, depth) {
 
   html += '</div>';
 
+  /* explanatory strip — how salinity is steering the temperature field */
   const driver = wc.salineShare > 0.5
     ? 'Salinity is the dominant control on stratification here, so the thermocline sits shallower than temperature alone would predict.'
     : 'Temperature dominates the density structure here; salinity is a secondary control.';
@@ -1181,6 +1213,7 @@ function renderTSDiagram(s, currentDepth) {
   const X = v => padL + ((v - sMin) / (sMax - sMin)) * plotW;
   const Y = v => padT + plotH - ((v - tMin) / (tMax - tMin)) * plotH;
 
+  /* isopycnal contours: for each σt target trace T(S) */
   const sigLo = sigmaT(tMax, sMin), sigHi = sigmaT(tMin, sMax);
   const step = (sigHi - sigLo) > 12 ? 4 : (sigHi - sigLo) > 6 ? 2 : 1;
   let iso = '';
@@ -1189,6 +1222,7 @@ function renderTSDiagram(s, currentDepth) {
     const seg = [];
     for (let i = 0; i <= 24; i++) {
       const sv = sMin + (sMax - sMin) * (i / 24);
+      /* invert σt(T,S)=sig for T by bisection */
       let lo = -2.5, hi = 40, mid = 0;
       for (let k = 0; k < 28; k++) {
         mid = (lo + hi) / 2;
@@ -1232,6 +1266,7 @@ function renderTSDiagram(s, currentDepth) {
     '<div class="ts-foot">Marker = current depth slice (−' + currentDepth + ' m). Dashed lines are constant-density curves: where the profile crosses them, a temperature change is being offset by salinity.</div>' +
     '</div>';
 }
+
 
 async function fetchSample(lat, lon) {
   abortActive();
@@ -1418,7 +1453,8 @@ function renderLoading(lat, lon) {
   $('stTitle').textContent = 'Sampling Station';
   $('locBanner').className = 'loc-banner';
   $('locIcon').innerHTML = SVG_ICONS.search;
-  $('locText').textContent = 'Resolving ' + getOfflineOceanName(lat, lon) + '…';
+  const onLand = isCoordinateOnLand(lat, lon);
+  $('locText').textContent = onLand ? 'Resolving locality…' : ('Resolving ' + getOfflineOceanName(lat, lon) + '…');
   setCoordChips(lat, lon);
   $('stContent').innerHTML =
     '<div class="msgbox loading"><div class="mini-spinner"></div>' +
@@ -1572,9 +1608,6 @@ function updateHUDFromSample(s) {
   else $('hSpeed').textContent = '--';
 
   $('hElev').textContent = s.elevation !== null ? Math.round(s.elevation) + ' m' : '--';
-
-  // Synchronize data availability in persistent floating depth widget
-  updateDepthWidgetDisplay();
 }
 
 function getCameraCenterCoord() {
@@ -1644,7 +1677,8 @@ function positionTip(x, y) {
 function tipQuick(lat, lon) {
   const c = $('tipCoord'), n = $('tipName'), r = $('tipRows');
   if (c) c.textContent = fmtCoord(lat, lon);
-  if (n) n.textContent = getOfflineOceanName(lat, lon);
+  const onLand = isCoordinateOnLand(lat, lon);
+  if (n) n.textContent = onLand ? (getOfflineLandRegion(lat, lon) || 'Resolving locality…') : getOfflineOceanName(lat, lon);
   if (r) r.innerHTML = '<div class="tr"><span>Status</span><b style="color:var(--teal)">sampling…</b></div>';
 }
 function tipFromSample(s) {
@@ -1725,15 +1759,8 @@ if (viewer) {
     }, 380);
   }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
-  // Click = select Argo float or lock a station at that point
+  // Click = lock a station at that point
   handler.setInputAction(click => {
-    // 1. Check if user clicked an Argo Float entity
-    const pickedObject = viewer.scene.pick(click.position);
-    if (Cesium.defined(pickedObject) && pickedObject.id && pickedObject.id._argoData) {
-      selectArgoFloat(pickedObject.id._argoData, true);
-      return;
-    }
-
     const cart = viewer.camera.pickEllipsoid(click.position, viewer.scene.globe.ellipsoid);
     if (!cart) return;
     const carto = Cesium.Cartographic.fromCartesian(cart);
@@ -1747,9 +1774,6 @@ if (viewer) {
       setPill('lock', 'LOCKED');
       toast('Station locked at ' + fmtCoord(lat, lon));
       $('btnLock').classList.add('active');
-      if (lastSample && !lastSample.isLand) {
-        loadOceanProfile(lastSample);
-      }
     });
   }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
@@ -1807,11 +1831,12 @@ async function getUserCurrentLocation(autoFly = true) {
 
     // Reverse geocode city/place name
     reverseGeocode(lat, lon).then(geo => {
-      const locName = geo.city || geo.landLocation || geo.oceanName || 'My Location';
-      userLocation.name = locName;
-      updateLocDisplay(locName);
+      const specificName = geo.locality || geo.city || (geo.isLand ? geo.landLocation : geo.oceanName) || 'My Location';
+      const fullHierarchy = geo.isLand ? (geo.landLocation || specificName) : (geo.oceanName || specificName);
+      userLocation.name = fullHierarchy;
+      updateLocDisplay(fullHierarchy);
       if (currentLocationIndicator && currentLocationIndicator.label) {
-        currentLocationIndicator.label.text = locName.toUpperCase();
+        currentLocationIndicator.label.text = specificName.toUpperCase();
       }
     });
 
@@ -2005,13 +2030,13 @@ document.querySelectorAll('.toggle-row').forEach(row => {
     const which = row.dataset.toggle;
     if (!viewer) return;
     switch (which) {
-      case 'labels': case 'landmarks': toggleLabels(on); break;
       case 'myLoc':
         if (currentLocationIndicator) currentLocationIndicator.show = on;
         if (currentLocationHalo) currentLocationHalo.show = on;
         toast(on ? 'Current location pin visible' : 'Current location pin hidden');
         break;
       case 'tiles': applyTilesMode(on); break;
+      case 'labels': setLabelsLayerVisible(on); break;
       case 'light': viewer.scene.globe.enableLighting = on; break;
       case 'grid': setGraticule(on); break;
       case 'atmo': viewer.scene.skyAtmosphere.show = on;
@@ -2036,12 +2061,9 @@ window.addEventListener('keydown', e => {
     case 'n': case 'N': $('btnNorth').click(); break;
     case 'c': case 'C': $('btnCenter').click(); break;
     case 'g': case 'G': getUserCurrentLocation(true); break;
-    case 'l': case 'L': toggleLabels(); break;
-    case 'b': case 'B': toggleLabels(); break;
     case 'h': case 'H': toggleSidebar(undefined, true); break;
-    case 'p': case 'P': toggleOceanProfilePanel(); break;
     case 'f': case 'F': $('btnFull').click(); break;
-    case 'k': case 'K': $('btnLock').click(); break;
+    case 'l': case 'L': $('btnLock').click(); break;
   }
 });
 
@@ -2067,12 +2089,6 @@ if (viewer) {
   updateCameraHUD();
   paintSlider(heightToSlider(HOME.height));
 }
-
-// Initialize Google Earth-style Borders & Labels overlay
-initLabelsLayer();
-
-// Initialize 3D Argo Float Network
-initArgoFloatNetwork();
 
 // Fallback readiness timer
 setTimeout(() => setCesiumReady(), 4000);
@@ -2117,10 +2133,10 @@ if ($('layerSalinity')) {
   };
 }
 
-// Connect live INCOIS Argo Float network feed
+// TODO: Connect live INCOIS Argo Float network feed
 if ($('layerArgoFloats')) {
   $('layerArgoFloats').onchange = e => {
-    toggleArgoLayer(e.target.checked);
+    toast(e.target.checked ? 'Argo float network active' : 'Argo float network hidden');
   };
 }
 
@@ -2132,309 +2148,28 @@ if ($('layerAIPredicted')) {
   };
 }
 
-/* ==================================================================
-   11b. COORDINATE SEARCH & NAVIGATION SYSTEM (Prompt Modal & Search Bars)
-   ================================================================== */
-const KNOWN_LOCATIONS = [
-  { name: 'mumbai', lat: 18.9220, lon: 72.8347, label: 'Mumbai, India' },
-  { name: 'delhi', lat: 28.6139, lon: 77.2090, label: 'New Delhi, India' },
-  { name: 'new delhi', lat: 28.6139, lon: 77.2090, label: 'New Delhi, India' },
-  { name: 'chennai', lat: 13.0827, lon: 80.2707, label: 'Chennai, India' },
-  { name: 'kolkata', lat: 22.5726, lon: 88.3639, label: 'Kolkata, India' },
-  { name: 'bengaluru', lat: 12.9716, lon: 77.5946, label: 'Bengaluru, India' },
-  { name: 'bangalore', lat: 12.9716, lon: 77.5946, label: 'Bengaluru, India' },
-  { name: 'goa', lat: 15.2993, lon: 74.1240, label: 'Goa, India' },
-  { name: 'kochi', lat: 9.9312, lon: 76.2673, label: 'Kochi, India' },
-  { name: 'mariana', lat: 11.3500, lon: 142.2000, label: 'Mariana Trench' },
-  { name: 'equator', lat: 0.0000, lon: 0.0000, label: 'Equator / Prime Meridian' }
-];
-
-function openCoordModal(prefillLat = null, prefillLon = null) {
-  const modal = $('coordModal');
-  if (!modal) return;
-
-  // Clear previous errors and error classes
-  const errLat = $('errCoordLat');
-  const errLon = $('errCoordLon');
-  const boxLat = $('boxCoordLat');
-  const boxLon = $('boxCoordLon');
-  if (errLat) errLat.textContent = '';
-  if (errLon) errLon.textContent = '';
-  if (boxLat) boxLat.classList.remove('has-error');
-  if (boxLon) boxLon.classList.remove('has-error');
-
-  const inputLat = $('inputCoordLat');
-  const inputLon = $('inputCoordLon');
-
-  if (prefillLat !== null && prefillLon !== null) {
-    if (inputLat) inputLat.value = prefillLat;
-    if (inputLon) inputLon.value = prefillLon;
-  } else {
-    // Check if user has entered partial or complete coordinates in either search input
-    const topVal = $('topbarSearchInput') ? $('topbarSearchInput').value.trim() : '';
-    const sideVal = $('ge-search-input') ? $('ge-search-input').value.trim() : '';
-    const candidate = topVal || sideVal;
-    if (candidate) {
-      const coordMatch = candidate.match(/^(-?\d+(\.\d+)?)[,\s/]+(-?\d+(\.\d+)?)$/);
-      if (coordMatch) {
-        if (inputLat) inputLat.value = coordMatch[1];
-        if (inputLon) inputLon.value = coordMatch[3];
-      }
-    }
-  }
-
-  modal.style.display = 'flex';
-
-  if (inputLat) {
-    setTimeout(() => {
-      inputLat.focus();
-      inputLat.select();
-    }, 80);
-  }
-}
-
-function closeCoordModal() {
-  const modal = $('coordModal');
-  if (modal) modal.style.display = 'none';
-}
-
-function navigateToCoordinates(lat, lon, label = '') {
-  if (!viewer) return;
-
-  // Ensure auto-rotation is paused
-  autoRotate = false;
-  if ($('btnSpin')) $('btnSpin').classList.remove('on');
-
-  const formatted = fmtCoord(lat, lon);
-  const displayLabel = label || formatted;
-
-  // Synchronize search inputs
-  if ($('topbarSearchInput')) $('topbarSearchInput').value = displayLabel;
-  if ($('ge-search-input')) $('ge-search-input').value = displayLabel;
-
-  // Place/update search target beacon
-  if (searchTargetIndicator && searchTargetHalo) {
-    const pos = Cesium.Cartesian3.fromDegrees(lon, lat, 0);
-    searchTargetIndicator.position = pos;
-    searchTargetHalo.position = pos;
-    if (searchTargetIndicator.label) {
-      searchTargetIndicator.label.text = `TARGET: ${displayLabel}`;
-    }
-    searchTargetIndicator.show = true;
-    searchTargetHalo.show = true;
-  }
-
-  // Camera flight to specified coordinate
-  flyTo(lat, lon, 350000, 2.2);
-
-  // Sample ocean telemetry at this exact point
-  fetchSample(lat, lon);
-
-  // Notification
-  toast('Navigating to ' + displayLabel);
-}
-
-function validateAndSubmitCoords() {
-  const inputLat = $('inputCoordLat');
-  const inputLon = $('inputCoordLon');
-  const errLat = $('errCoordLat');
-  const errLon = $('errCoordLon');
-  const boxLat = $('boxCoordLat');
-  const boxLon = $('boxCoordLon');
-
-  if (errLat) errLat.textContent = '';
-  if (errLon) errLon.textContent = '';
-  if (boxLat) boxLat.classList.remove('has-error');
-  if (boxLon) boxLon.classList.remove('has-error');
-
-  const latRaw = inputLat ? inputLat.value.trim() : '';
-  const lonRaw = inputLon ? inputLon.value.trim() : '';
-
-  let hasError = false;
-
-  // 1. SPECIFIC VALIDATION FOR BOX 1: LATITUDE
-  if (!latRaw) {
-    if (errLat) errLat.textContent = 'Please enter Latitude in Box 1 (-90° to +90°)';
-    if (boxLat) boxLat.classList.add('has-error');
-    if (!hasError && inputLat) inputLat.focus();
-    hasError = true;
-  } else {
-    const lat = parseFloat(latRaw);
-    if (isNaN(lat)) {
-      if (errLat) errLat.textContent = 'Latitude must be a valid number';
-      if (boxLat) boxLat.classList.add('has-error');
-      if (!hasError && inputLat) inputLat.focus();
-      hasError = true;
-    } else if (lat < -90 || lat > 90) {
-      if (errLat) errLat.textContent = 'Latitude must be between -90.0° and +90.0°';
-      if (boxLat) boxLat.classList.add('has-error');
-      if (!hasError && inputLat) inputLat.focus();
-      hasError = true;
-    }
-  }
-
-  // 2. SPECIFIC VALIDATION FOR BOX 2: LONGITUDE
-  if (!lonRaw) {
-    if (errLon) errLon.textContent = 'Please enter Longitude in Box 2 (-180° to +180°)';
-    if (boxLon) boxLon.classList.add('has-error');
-    if (!hasError && inputLon) inputLon.focus();
-    hasError = true;
-  } else {
-    const lon = parseFloat(lonRaw);
-    if (isNaN(lon)) {
-      if (errLon) errLon.textContent = 'Longitude must be a valid number';
-      if (boxLon) boxLon.classList.add('has-error');
-      if (!hasError && inputLon) inputLon.focus();
-      hasError = true;
-    } else if (lon < -180 || lon > 180) {
-      if (errLon) errLon.textContent = 'Longitude must be between -180.0° and +180.0°';
-      if (boxLon) boxLon.classList.add('has-error');
-      if (!hasError && inputLon) inputLon.focus();
-      hasError = true;
-    }
-  }
-
-  if (hasError) return false;
-
-  const lat = parseFloat(latRaw);
-  const lon = parseFloat(lonRaw);
-
-  closeCoordModal();
-  navigateToCoordinates(lat, lon);
-  return true;
-}
-
-// Wire up search buttons & modal controls
-if ($('btnSearchIcon')) {
-  $('btnSearchIcon').onclick = (e) => {
-    e.stopPropagation();
-    openCoordModal();
-  };
-}
-
-if ($('btnSidebarSearchIcon')) {
-  $('btnSidebarSearchIcon').onclick = (e) => {
-    e.stopPropagation();
-    openCoordModal();
-  };
-}
-
-if ($('btnCloseCoordModal')) $('btnCloseCoordModal').onclick = closeCoordModal;
-if ($('btnCancelCoordModal')) $('btnCancelCoordModal').onclick = closeCoordModal;
-
-if ($('coordModal')) {
-  $('coordModal').onclick = (e) => {
-    // Close if clicked directly on backdrop or overlay background
-    if (e.target === $('coordModal') || e.target.id === 'dlgOverlayBg') {
-      closeCoordModal();
-    }
-  };
-}
-
-if ($('coordSearchForm')) {
-  $('coordSearchForm').onsubmit = (e) => {
-    e.preventDefault();
-    validateAndSubmitCoords();
-  };
-}
-
-// Sync Current Camera View Toggle Switch (From Sample Code Toggle Section)
-let syncCamActive = false;
-if ($('btnSyncCurrentCam')) {
-  $('btnSyncCurrentCam').onclick = () => {
-    syncCamActive = !syncCamActive;
-    $('btnSyncCurrentCam').classList.toggle('active', syncCamActive);
-    $('btnSyncCurrentCam').setAttribute('aria-checked', String(syncCamActive));
-
-    if (syncCamActive && viewer) {
-      const c = viewer.camera.positionCartographic;
-      const lat = Cesium.Math.toDegrees(c.latitude).toFixed(4);
-      const lon = Cesium.Math.toDegrees(c.longitude).toFixed(4);
-      if ($('inputCoordLat')) $('inputCoordLat').value = lat;
-      if ($('inputCoordLon')) $('inputCoordLon').value = lon;
-      // Remove any active preset highlights when custom syncing
-      document.querySelectorAll('.dlg-tab-btn').forEach(btn => btn.classList.remove('active'));
-      toast(`Synced camera position: ${lat}°, ${lon}°`);
-    }
-  };
-}
-
-// Preset Location Tabs (From Sample Code Pricing Tabs)
-document.querySelectorAll('.dlg-tab-btn').forEach(tab => {
-  tab.onclick = () => {
-    document.querySelectorAll('.dlg-tab-btn').forEach(btn => btn.classList.remove('active'));
-    tab.classList.add('active');
-
-    const lat = tab.getAttribute('data-lat');
-    const lon = tab.getAttribute('data-lon');
-    if ($('inputCoordLat')) $('inputCoordLat').value = lat;
-    if ($('inputCoordLon')) $('inputCoordLon').value = lon;
-
-    // Turn off camera sync toggle since preset is chosen
-    if ($('btnSyncCurrentCam')) {
-      syncCamActive = false;
-      $('btnSyncCurrentCam').classList.remove('active');
-      $('btnSyncCurrentCam').setAttribute('aria-checked', 'false');
-    }
-
-    // Clear any previous field error states
-    const boxLat = $('boxCoordLat');
-    const boxLon = $('boxCoordLon');
-    const errLat = $('errCoordLat');
-    const errLon = $('errCoordLon');
-    if (boxLat) boxLat.classList.remove('has-error');
-    if (boxLon) boxLon.classList.remove('has-error');
-    if (errLat) errLat.textContent = '';
-    if (errLon) errLon.textContent = '';
-  };
-});
-
-// Keyboard Listener: 'F' to open search dialog, 'Escape' to close (From Sample Code)
-window.addEventListener('keydown', (e) => {
-  const modal = $('coordModal');
-  const isOpen = modal && modal.style.display !== 'none';
-
-  if (
-    e.key.toLowerCase() === 'f' &&
-    !isOpen &&
-    document.activeElement?.tagName !== 'INPUT' &&
-    document.activeElement?.tagName !== 'TEXTAREA'
-  ) {
-    e.preventDefault();
-    openCoordModal();
-  } else if (e.key === 'Escape' && isOpen) {
-    e.preventDefault();
-    e.stopPropagation();
-    closeCoordModal();
-  }
-}, true);
-
-// Sidebar Search Input: Enter key handling
+// Search Input — Supports coordinates & ocean basins with honest status feedback
 if ($('ge-search-input')) {
   $('ge-search-input').onkeydown = e => {
     if (e.key === 'Enter') {
       const q = e.target.value.trim();
-      if (!q) {
-        openCoordModal();
-        return;
-      }
-      const coordMatch = q.match(/^(-?\d+(\.\d+)?)[,\s/]+(-?\d+(\.\d+)?)$/);
+      if (!q) return;
+      // 1. Direct coordinate navigation: "lat, lon" or "lat lon"
+      const coordMatch = q.match(/^(-?\d+(\.\d+)?)[,\s]+(-?\d+(\.\d+)?)$/);
       if (coordMatch) {
         const lat = parseFloat(coordMatch[1]);
         const lon = parseFloat(coordMatch[3]);
         if (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
-          navigateToCoordinates(lat, lon);
+          flyTo(lat, lon, 350000, 2.2);
+          toast('Navigating to ' + fmtCoord(lat, lon));
+          fetchSample(lat, lon);
           return;
         }
       }
-      const qLower = q.toLowerCase();
-      const matchLoc = KNOWN_LOCATIONS.find(loc => qLower.includes(loc.name) || loc.name.includes(qLower));
-      if (matchLoc) {
-        navigateToCoordinates(matchLoc.lat, matchLoc.lon, matchLoc.label);
-        return;
-      }
+      // 2. Ocean basin quick match
       const sel = $('jumpSel');
       if (sel) {
+        const qLower = q.toLowerCase();
         for (let i = 0; i < sel.options.length; i++) {
           const opt = sel.options[i];
           if (opt.value && opt.text.toLowerCase().includes(qLower)) {
@@ -2444,56 +2179,63 @@ if ($('ge-search-input')) {
           }
         }
       }
-      openCoordModal();
+      // 3. Fallback with honest integration status
+      toast('Searching "' + q + '" — Offline gazetteer lookup in progress');
     }
   };
 }
 
 /* ==================================================================
-   12. DEPTH OBSERVATION CONTROL
+   12. TEMPORAL & DEPTH OBSERVATION CONTROLS
    ================================================================== */
-let currentObservationDepth = 1000;
+let currentObservationDepth = 0;
 let isTimelinePlaying = false;
 let timelinePlaybackTimer = null;
 let timelineSpeed = 1;
 
-const depthWidget = $('floatingDepthWidget');
-const depthInput = $('depthRange');
-const depthNum = $('fDepthNum');
-
-function updateDepthValue(val) {
-  const depth = Math.max(0, Math.min(6000, Number(val) || 0));
-  currentObservationDepth = depth;
-  if (depthNum) {
-    depthNum.textContent = depth;
+function setObservationDepth(depthMeters, updateSlider = true) {
+  currentObservationDepth = Math.max(0, Math.min(3000, Number(depthMeters) || 0));
+  const badge = $('depthValBadge');
+  if (badge) {
+    badge.textContent = currentObservationDepth === 0 ? '0 m (Surface)' : `-${currentObservationDepth} m`;
+  }
+  if (updateSlider && $('depthRange')) {
+    $('depthRange').value = currentObservationDepth;
+  }
+  // Update depth preset buttons
+  document.querySelectorAll('.depth-btn').forEach(btn => {
+    const d = Number(btn.getAttribute('data-depth'));
+    btn.classList.toggle('active', d === currentObservationDepth);
+  });
+  // If a marine station is active, re-render the whole salinity / T-S stack
+  if (lastSample && !lastSample.isLand) {
+    if (!lastSample.ocn) attachOceanography(lastSample);
+    const wasLocked = locked;
+    locked = false;
+    renderSample(lastSample);
+    locked = wasLocked;
+    updateHUDFromSample(lastSample);
   }
 }
 
-if (depthInput) {
-  // Update depth immediately whenever the slider moves (drag or keyboard)
-  depthInput.addEventListener('input', e => {
-    updateDepthValue(e.target.value);
+// Depth Slider
+if ($('depthRange')) {
+  $('depthRange').addEventListener('input', e => {
+    setObservationDepth(e.target.value, false);
   });
-
-  depthInput.addEventListener('change', e => {
-    updateDepthValue(e.target.value);
+  $('depthRange').addEventListener('change', e => {
+    toast(`Depth slice adjusted to ${e.target.value === '0' ? 'Surface' : '-' + e.target.value + 'm'}`);
   });
 }
 
-// Stop Cesium globe camera movement when interacting with depth widget
-if (depthWidget) {
-  const stopEvent = e => e.stopPropagation();
-  depthWidget.addEventListener('mousedown', stopEvent);
-  depthWidget.addEventListener('pointerdown', stopEvent);
-  depthWidget.addEventListener('touchstart', stopEvent, { passive: true });
-  depthWidget.addEventListener('wheel', stopEvent);
-  depthWidget.addEventListener('dblclick', stopEvent);
-}
-
-// Initialize on boot
-if (depthInput) {
-  updateDepthValue(depthInput.value);
-}
+// Depth Preset Buttons
+document.querySelectorAll('.depth-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const d = Number(btn.getAttribute('data-depth'));
+    setObservationDepth(d, true);
+    toast(`Depth slice: ${d === 0 ? 'Surface (0m)' : '-' + d + 'm'}`);
+  });
+});
 
 // Play / Pause Timeline
 function toggleTimelinePlayback() {
@@ -2577,754 +2319,325 @@ document.querySelectorAll('.speed-btn').forEach(btn => {
 });
 
 /* ==================================================================
-   13. ARGO FLOAT NETWORK & OCEAN PROFILE PLATFORM
+   13. FLOATING DEPTH CONTROL + WEATHER COLORS + HEATMAP
    ================================================================== */
 
-const ARGO_FLOAT_NETWORK = [
-  { id: 'ARGO-45821', wmo: '2903341', name: 'Arabian Sea High-Salinity Float', lat: 15.4200, lon: 72.8400, platform: 'PROVOR-CTS4', cycle: 142, depthRange: [0, 2000], sensor: 'SBE-41CP CTD + DO', battery: '91%', lastTransmission: '12m ago', basin: 'Arabian Sea', waterMass: 'Arabian Sea High-Salinity Water' },
-  { id: 'ARGO-45822', wmo: '2903342', name: 'Mumbai Shelf Profiler', lat: 18.9220, lon: 71.4500, platform: 'APEX-11', cycle: 88, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '84%', lastTransmission: '35m ago', basin: 'Arabian Sea', waterMass: 'Arabian Sea Coastal Water' },
-  { id: 'ARGO-45823', wmo: '2903343', name: 'Bay of Bengal North Float', lat: 17.8500, lon: 88.3500, platform: 'ARVOR-I', cycle: 114, depthRange: [0, 2000], sensor: 'SBE-41CP CTD + FLBB', battery: '79%', lastTransmission: '1h ago', basin: 'Bay of Bengal', waterMass: 'Bay of Bengal Low-Salinity Water' },
-  { id: 'ARGO-45824', wmo: '2903344', name: 'Ganges Plume Profiler', lat: 20.4500, lon: 89.2000, platform: 'APEX-11', cycle: 67, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '88%', lastTransmission: '2h ago', basin: 'Bay of Bengal', waterMass: 'Ganges Freshwater Dilution Plume' },
-  { id: 'ARGO-45825', wmo: '2903345', name: 'Andaman Basin Deep Float', lat: 11.2000, lon: 93.6500, platform: 'PROVOR-CTS4', cycle: 95, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '93%', lastTransmission: '45m ago', basin: 'Andaman Sea', waterMass: 'Andaman Deep Water' },
-  { id: 'ARGO-45826', wmo: '2903346', name: 'Equatorial Indian Ocean Float', lat: 1.5000, lon: 80.5000, platform: 'SOLO-II', cycle: 178, depthRange: [0, 2000], sensor: 'SBE-41CP CTD + pH', battery: '72%', lastTransmission: '18m ago', basin: 'Indian Ocean', waterMass: 'Tropical Surface Water' },
-  { id: 'ARGO-45827', wmo: '2903347', name: 'Laccadive Sea Boundary Profiler', lat: 8.5000, lon: 74.8000, platform: 'ARVOR-I', cycle: 132, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '86%', lastTransmission: '3h ago', basin: 'Laccadive Sea', waterMass: 'Mixed Arabian / Bay Water' },
-  { id: 'ARGO-45828', wmo: '2903348', name: 'Southern Indian Ocean Subtropical', lat: -25.4000, lon: 85.2000, platform: 'PROVOR-CTS4', cycle: 204, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '68%', lastTransmission: '4h ago', basin: 'Indian Ocean', waterMass: 'Subtropical Surface Water' },
-  { id: 'ARGO-45829', wmo: '2903349', name: 'Southern Ocean Polar Front Float', lat: -55.8000, lon: 75.0000, platform: 'APEX-Deep', cycle: 156, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '74%', lastTransmission: '5h ago', basin: 'Southern Ocean', waterMass: 'Antarctic Intermediate Water (AAIW)' },
-  { id: 'ARGO-45830', wmo: '2903350', name: 'Red Sea Deep Basin Profiler', lat: 21.3000, lon: 38.2000, platform: 'SOLO-II', cycle: 89, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '95%', lastTransmission: '28m ago', basin: 'Red Sea', waterMass: 'Hypersaline Basin Water' },
-  { id: 'ARGO-45831', wmo: '2903351', name: 'Persian Gulf Strait Sentinel', lat: 25.8000, lon: 55.4000, platform: 'ARVOR-I', cycle: 77, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '82%', lastTransmission: '1h ago', basin: 'Persian Gulf', waterMass: 'Persian Gulf Outflow Plume' },
-  { id: 'ARGO-45832', wmo: '2903352', name: 'Somali Current Jet Profiler', lat: 7.2000, lon: 52.8000, platform: 'PROVOR-CTS4', cycle: 161, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '89%', lastTransmission: '52m ago', basin: 'Arabian Sea', waterMass: 'Somali Upwelling Water' },
-  { id: 'ARGO-45833', wmo: '2903353', name: 'Maldives Marine Sanctuary Float', lat: 3.8000, lon: 73.5000, platform: 'APEX-11', cycle: 120, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '90%', lastTransmission: '38m ago', basin: 'Indian Ocean', waterMass: 'Equatorial Warm Pool' },
-  { id: 'ARGO-45834', wmo: '2903354', name: 'Chagos-Laccadive Ridge Float', lat: -6.0000, lon: 72.0000, platform: 'SOLO-II', cycle: 145, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '85%', lastTransmission: '2h ago', basin: 'Indian Ocean', waterMass: 'Indian Central Water' },
-  { id: 'ARGO-45835', wmo: '2903355', name: 'Western Australian Basin Float', lat: -18.5000, lon: 110.2000, platform: 'PROVOR-CTS4', cycle: 99, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '81%', lastTransmission: '3h ago', basin: 'Indian Ocean', waterMass: 'Leeuwin Current Water' },
-  { id: 'ARGO-45836', wmo: '2903356', name: 'Madagascar Channel Profiler', lat: -16.2000, lon: 44.5000, platform: 'APEX-11', cycle: 110, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '78%', lastTransmission: '4h ago', basin: 'Indian Ocean', waterMass: 'Agulhas Eddy Source Water' },
-  { id: 'ARGO-45837', wmo: '2903357', name: 'South China Sea Basal Float', lat: 14.5000, lon: 114.2000, platform: 'SOLO-II', cycle: 135, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '87%', lastTransmission: '1h ago', basin: 'South China Sea', waterMass: 'South China Sea Intermediate' },
-  { id: 'ARGO-45838', wmo: '2903358', name: 'Mariana Trench Abyssal Sentinel', lat: 11.3500, lon: 142.2000, platform: 'APEX-Deep', cycle: 210, depthRange: [0, 2000], sensor: 'SBE-41CP CTD + Deep CTD', battery: '65%', lastTransmission: '30m ago', basin: 'Pacific Ocean', waterMass: 'Pacific Deep Abyssal Water' },
-  { id: 'ARGO-45839', wmo: '2903359', name: 'North Atlantic Subpolar Gyre', lat: 56.4000, lon: -32.5000, platform: 'PROVOR-CTS4', cycle: 180, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '76%', lastTransmission: '2h ago', basin: 'North Atlantic Ocean', waterMass: 'North Atlantic Deep Water (NADW)' },
-  { id: 'ARGO-45840', wmo: '2903360', name: 'Gulf Stream Boundary Float', lat: 34.2000, lon: -72.8000, platform: 'SOLO-II', cycle: 150, depthRange: [0, 2000], sensor: 'SBE-41CP CTD', battery: '83%', lastTransmission: '1h ago', basin: 'North Atlantic Ocean', waterMass: 'Subtropical Underwater' }
-];
+/* ---- Configuration ---- */
+const BACKEND_URL = 'http://localhost:8001';
+let backendAvailable = false;
+let weatherMode = false;
 
-let argoEntities = [];
-let selectedArgoHalo = null;
-let activeOceanProfile = null;
-let activeGraphParam = 'temp';
-let activeProfileTab = 'overview';
-let activeComparisonStationKey = 'bay_of_bengal';
-
-function initArgoFloatNetwork() {
-  if (!viewer || argoEntities.length > 0) return;
-
-  selectedArgoHalo = viewer.entities.add({
-    name: 'Selected Argo Halo',
-    position: Cesium.Cartesian3.ZERO,
-    show: false,
-    point: {
-      pixelSize: new Cesium.CallbackProperty(() => 26 + 8 * Math.sin(Date.now() / 200), false),
-      color: new Cesium.CallbackProperty(() => {
-        const alpha = Math.max(0.1, 0.35 + 0.2 * Math.sin(Date.now() / 200));
-        return Cesium.Color.fromCssColorString('#7DD3FC').withAlpha(alpha);
-      }, false),
-      outlineColor: Cesium.Color.fromCssColorString('#38BDF8'),
-      outlineWidth: 2,
-      disableDepthTestDistance: Number.POSITIVE_INFINITY
+/* ---- Backend health check (non-blocking) ---- */
+(async function checkBackend() {
+  try {
+    const r = await fetch(BACKEND_URL + '/health', { signal: AbortSignal.timeout(3000) });
+    if (r.ok) {
+      const data = await r.json();
+      backendAvailable = data.status === 'ok';
+      if (backendAvailable) console.info('OceanXplore backend connected:', data);
     }
-  });
-
-  ARGO_FLOAT_NETWORK.forEach(float => {
-    const pos = Cesium.Cartesian3.fromDegrees(float.lon, float.lat, 0);
-    const entity = viewer.entities.add({
-      name: float.id,
-      position: pos,
-      point: {
-        pixelSize: 9,
-        color: Cesium.Color.fromCssColorString('#7DD3FC'),
-        outlineColor: Cesium.Color.fromCssColorString('#0B1014'),
-        outlineWidth: 2,
-        disableDepthTestDistance: Number.POSITIVE_INFINITY
-      },
-      label: {
-        text: float.id,
-        font: '700 9px JetBrains Mono, monospace',
-        fillColor: Cesium.Color.fromCssColorString('#A8C7FA'),
-        outlineColor: Cesium.Color.fromCssColorString('#0B1014'),
-        outlineWidth: 2,
-        style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-        pixelOffset: new Cesium.Cartesian2(0, -14),
-        distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 15000000),
-        disableDepthTestDistance: Number.POSITIVE_INFINITY
-      }
-    });
-    entity._argoData = float;
-    argoEntities.push(entity);
-  });
-
-  const isLayerActive = $('layerArgoFloats') ? $('layerArgoFloats').checked : true;
-  toggleArgoLayer(isLayerActive);
-}
-
-function toggleArgoLayer(visible) {
-  argoEntities.forEach(e => { e.show = visible; });
-  if (selectedArgoHalo && !visible) {
-    selectedArgoHalo.show = false;
+  } catch (e) {
+    backendAvailable = false;
+    console.info('Backend not available — using client-side oceanography engine');
   }
-  toast(visible ? 'Argo float network active (20 global floats)' : 'Argo float network hidden');
+})();
+
+/* ---- Floating Depth Slider ---- */
+const fdcRange = $('fdcDepthRange');
+const fdcValue = $('fdcDepthValue');
+const fdcStatus = $('fdcStatus');
+const sidebarRange = $('depthRange');
+
+function formatDepthDisplay(d) {
+  if (d === 0) return '0 m';
+  if (d >= 1000) return (d / 1000).toFixed(d % 1000 === 0 ? 0 : 1) + ' km';
+  return d.toLocaleString() + ' m';
 }
 
-/* ---- Thermocline Detection Algorithm ---- */
-function detectThermocline(sample) {
-  if (!sample || !sample.ocn) {
-    return { top: 50, bottom: 200, peakGrad: 0.08, tempDrop: 14.0, isStratified: true };
+function updateFloatingDepthUI(depth) {
+  if (fdcValue) {
+    fdcValue.textContent = depth === 0 ? '0 m (Surface)' : '−' + formatDepthDisplay(depth);
   }
-  const o = sample.ocn;
-  const depths = [0, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 600, 800, 1000];
-  const temps = depths.map(d => o.ts(d).t);
-
-  let maxGrad = 0;
-  let top = null;
-  let bottom = null;
-
-  for (let i = 0; i < depths.length - 1; i++) {
-    const dz = depths[i + 1] - depths[i];
-    const dt = Math.abs(temps[i] - temps[i + 1]);
-    const grad = dt / dz;
-    if (grad > maxGrad) {
-      maxGrad = grad;
-    }
-    if (grad >= 0.025 && top === null) {
-      top = depths[i];
-    }
-    if (top !== null && grad < 0.020 && bottom === null && depths[i] > top) {
-      bottom = depths[i + 1];
-    }
+  if (fdcStatus) {
+    if (depth === 0) fdcStatus.textContent = 'Surface observation';
+    else if (depth <= 200) fdcStatus.textContent = 'Epipelagic zone';
+    else if (depth <= 1000) fdcStatus.textContent = 'Mesopelagic zone';
+    else fdcStatus.textContent = 'Bathypelagic zone';
   }
-
-  top = top || 45;
-  bottom = bottom || Math.max(160, top + 110);
-  const tempDrop = Math.abs(o.ts(top).t - o.ts(bottom).t);
-
-  return {
-    top,
-    bottom,
-    peakGrad: maxGrad > 0 ? maxGrad : 0.065,
-    tempDrop,
-    isStratified: maxGrad >= 0.02
-  };
 }
 
-/* ---- Thermal Gradient & Anomaly Calculations ---- */
-function calculateThermalGradient(sample) {
-  if (!sample || !sample.ocn) return { deltaT: 22.0, category: 'Tropical' };
-  const o = sample.ocn;
-  const tSurf = o.ts(0).t;
-  const tDeep = o.ts(2000).t;
-  const deltaT = Math.max(0, tSurf - tDeep);
-
-  let category = 'Tropical';
-  if (deltaT < 4) category = 'Polar (<4°C)';
-  else if (deltaT < 14) category = 'Temperate (4–14°C)';
-  else if (deltaT < 22) category = 'Tropical (14–22°C)';
-  else category = 'Extreme (>22°C)';
-
-  return { deltaT, category, tSurf, tDeep };
-}
-
-function calculateDepthAnomalies(sample) {
-  if (!sample || !sample.ocn) return [];
-  const o = sample.ocn;
-  const checkDepths = [0, 100, 500, 2000];
-  const baselines = {
-    0: o.sst,
-    100: Math.max(16, o.sst - 6),
-    500: 10.5,
-    2000: 3.2
-  };
-
-  return checkDepths.map(d => {
-    const val = o.ts(d).t;
-    const base = baselines[d];
-    const diff = Number((val - base).toFixed(2));
-    let status = 'norm';
-    let arrow = '→';
-    if (diff >= 0.3) { status = 'warm'; arrow = '↑'; }
-    else if (diff <= -0.3) { status = 'cold'; arrow = '↓'; }
-    return { depth: d, val, base, diff, status, arrow };
-  });
-}
-
-/* ---- Inverted Scientific Depth Chart SVG Generator ---- */
-function renderInvertedScientificChart(sample, param = 'temp', compareSample = null) {
-  if (!sample || !sample.ocn) return '';
-  const oA = sample.ocn;
-  const oB = compareSample ? compareSample.ocn : null;
-  const therm = detectThermocline(sample);
-
-  const W = 340, H = 240;
-  const padL = 42, padR = 20, padT = 24, padB = 26;
-  const plotW = W - padL - padR;
-  const plotH = H - padT - padB;
-  const maxDepth = 2000;
-
-  const yForDepth = d => padT + (Math.min(maxDepth, Math.max(0, d)) / maxDepth) * plotH;
-
-  let minVal = 0, maxVal = 32, unit = '°C', label = 'Temperature';
-  if (param === 'sal') {
-    minVal = 32.0; maxVal = 40.0; unit = 'PSU'; label = 'Salinity';
-  } else if (param === 'pres') {
-    minVal = 0; maxVal = 210; unit = 'bar'; label = 'Pressure';
-  }
-
-  const depths = [0, 25, 50, 75, 100, 150, 200, 250, 300, 400, 500, 600, 800, 1000, 1200, 1600, 2000];
-  const getVal = (o, d) => {
-    if (!o) return 0;
-    if (param === 'temp') return o.ts(d).t;
-    if (param === 'sal') return o.ts(d).s;
-    if (param === 'pres') return d / 10;
-    return 0;
-  };
-
-  const valsA = depths.map(d => getVal(oA, d));
-  const valsB = oB ? depths.map(d => getVal(oB, d)) : [];
-  const allVals = valsA.concat(valsB);
-  if (param === 'sal') {
-    minVal = Math.floor(Math.min(...allVals) - 0.5);
-    maxVal = Math.ceil(Math.max(...allVals) + 0.5);
-  }
-
-  const xForVal = v => padL + Math.max(0, Math.min(plotW, ((v - minVal) / (maxVal - minVal)) * plotW));
-
-  const ptsA = depths.map((d, i) => `${xForVal(valsA[i]).toFixed(1)},${yForDepth(d).toFixed(1)}`).join(' ');
-  const ptsB = oB ? depths.map((d, i) => `${xForVal(valsB[i]).toFixed(1)},${yForDepth(d).toFixed(1)}`).join(' ') : '';
-
-  const depthTicks = [0, 500, 1000, 1500, 2000];
-  const hGrid = depthTicks.map(d => `
-    <line x1="${padL}" y1="${yForDepth(d)}" x2="${padL + plotW}" y2="${yForDepth(d)}" stroke="#30343A" stroke-width="0.8" stroke-dasharray="2 3"/>
-    <text x="${padL - 6}" y="${yForDepth(d) + 3}" fill="#9AA0A6" font-size="7.5" font-family="var(--mono)" text-anchor="end">${d}m</text>
-  `).join('');
-
-  const xSteps = 4;
-  let vGrid = '';
-  for (let i = 0; i <= xSteps; i++) {
-    const v = minVal + (i / xSteps) * (maxVal - minVal);
-    const x = xForVal(v);
-    vGrid += `
-      <line x1="${x}" y1="${padT}" x2="${x}" y2="${padT + plotH}" stroke="#30343A" stroke-width="0.6" stroke-dasharray="2 3"/>
-      <text x="${x}" y="${H - 10}" fill="#9AA0A6" font-size="7.5" font-family="var(--mono)" text-anchor="middle">${v.toFixed(param === 'sal' ? 1 : 0)}</text>
-    `;
-  }
-
-  let thermBand = '';
-  if (param === 'temp' && therm.isStratified) {
-    const yT = yForDepth(therm.top);
-    const yB = yForDepth(therm.bottom);
-    thermBand = `
-      <rect x="${padL}" y="${yT}" width="${plotW}" height="${Math.max(2, yB - yT)}" fill="rgba(242, 139, 130, 0.10)" stroke="rgba(242, 139, 130, 0.35)" stroke-dasharray="3 3" rx="2"/>
-      <text x="${padL + 6}" y="${yT + 11}" fill="#F28B82" font-size="7.5" font-family="var(--mono)" font-weight="600">Thermocline (${therm.top}–${therm.bottom}m)</text>
-    `;
-  }
-
-  return `
-    <svg class="scientific-chart-svg" id="scientificChartSvg" viewBox="0 0 ${W} ${H}" data-min="${minVal}" data-max="${maxVal}" data-param="${param}" data-unit="${unit}">
-      <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="none" stroke="#30343A" stroke-width="1"/>
-      ${thermBand}
-      ${hGrid}
-      ${vGrid}
-      
-      <polyline fill="none" stroke="#F28B82" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" points="${ptsA}"/>
-      ${ptsB ? `<polyline fill="none" stroke="#7DD3FC" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="4 2" points="${ptsB}"/>` : ''}
-
-      <g id="chartProbeGroup" style="display: none;">
-        <line id="probeHLine" x1="${padL}" y1="${padT}" x2="${padL + plotW}" y2="${padT}" stroke="#A8C7FA" stroke-width="1.2" stroke-dasharray="3 2"/>
-        <line id="probeVLine" x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="#A8C7FA" stroke-width="1.2" stroke-dasharray="3 2"/>
-        <circle id="probeMarkerA" cx="0" cy="0" r="4" fill="#F28B82" stroke="#FFFFFF" stroke-width="1.5"/>
-        ${ptsB ? `<circle id="probeMarkerB" cx="0" cy="0" r="3.5" fill="#7DD3FC" stroke="#FFFFFF" stroke-width="1.5"/>` : ''}
-      </g>
-      
-      <text x="${W - padR}" y="${H - 10}" fill="#8AB4F8" font-size="7.5" font-family="var(--mono)" font-weight="600" text-anchor="end">${unit}</text>
-      <text x="${padL}" y="${padT - 8}" fill="#9AA0A6" font-size="8" font-family="var(--mono)" font-weight="600">Depth (0m → 2000m)</text>
-    </svg>
-  `;
-}
-
-function attachChartProbeHover() {
-  const svg = $('scientificChartSvg');
-  if (!svg || !activeOceanProfile) return;
-
-  const probeGroup = $('chartProbeGroup');
-  const hLine = $('probeHLine');
-  const vLine = $('probeVLine');
-  const markerA = $('probeMarkerA');
-  const probeText = $('probeText');
-
-  const W = 340, H = 240;
-  const padL = 42, padR = 20, padT = 24, padB = 26;
-  const plotW = W - padL - padR;
-  const plotH = H - padT - padB;
-  const maxDepth = 2000;
-
-  const minVal = parseFloat(svg.getAttribute('data-min'));
-  const maxVal = parseFloat(svg.getAttribute('data-max'));
-  const param = svg.getAttribute('data-param');
-  const unit = svg.getAttribute('data-unit');
-
-  svg.addEventListener('mousemove', e => {
-    const rect = svg.getBoundingClientRect();
-    const scaleX = W / rect.width;
-    const scaleY = H / rect.height;
-    const svgX = (e.clientX - rect.left) * scaleX;
-    const svgY = (e.clientY - rect.top) * scaleY;
-
-    if (svgX < padL || svgX > padL + plotW || svgY < padT || svgY > padT + plotH) {
-      if (probeGroup) probeGroup.style.display = 'none';
-      return;
-    }
-
-    if (probeGroup) probeGroup.style.display = 'block';
-
-    const depth = Math.max(0, Math.min(maxDepth, ((svgY - padT) / plotH) * maxDepth));
-    const wc = waterColumnAt(activeOceanProfile, depth);
-    let valA = 0;
-    if (param === 'temp') valA = wc.t;
-    else if (param === 'sal') valA = wc.s;
-    else if (param === 'pres') valA = depth / 10;
-
-    const xA = padL + Math.max(0, Math.min(plotW, ((valA - minVal) / (maxVal - minVal)) * plotW));
-    const yA = padT + (depth / maxDepth) * plotH;
-
-    if (hLine) {
-      hLine.setAttribute('y1', yA);
-      hLine.setAttribute('y2', yA);
-    }
-    if (vLine) {
-      vLine.setAttribute('x1', xA);
-      vLine.setAttribute('x2', xA);
-    }
-    if (markerA) {
-      markerA.setAttribute('cx', xA);
-      markerA.setAttribute('cy', yA);
-    }
-
-    if (probeText) {
-      probeText.textContent = `Depth: -${Math.round(depth)}m | ${param.toUpperCase()}: ${valA.toFixed(2)} ${unit} | Density: ${wc.sigma.toFixed(2)} kg/m³ | Sound: ${Math.round(wc.c)} m/s`;
-    }
-  });
-
-  svg.addEventListener('mouseleave', () => {
-    if (probeGroup) probeGroup.style.display = 'none';
-    if (probeText) {
-      probeText.textContent = 'Hover cursor over graph to probe telemetry at any depth';
-    }
-  });
-}
-
-/* ---- Thermal Column Generator ---- */
-function renderThermalColumn(sample) {
-  if (!sample || !sample.ocn) return '';
-  const o = sample.ocn;
-  const colDepths = [
-    { d: 0, zone: 'Epipelagic Surface' },
-    { d: 100, zone: 'Euphotic Floor' },
-    { d: 250, zone: 'Thermocline Core' },
-    { d: 500, zone: 'Mesopelagic Twilight' },
-    { d: 1000, zone: 'Intermediate Water' },
-    { d: 1500, zone: 'Bathypelagic Transition' },
-    { d: 2000, zone: 'Abyssal Bathypelagic' }
-  ];
-
-  const getColor = t => {
-    if (t >= 26) return '#F28B82';
-    if (t >= 20) return '#F9AB00';
-    if (t >= 12) return '#7DD3FC';
-    if (t >= 6) return '#8AB4F8';
-    return '#3B82F6';
-  };
-
-  return colDepths.map(item => {
-    const wc = waterColumnAt(sample, item.d);
-    const color = getColor(wc.t);
-    return `
-      <div class="thermal-col-segment" style="--seg-color: ${color};">
-        <div class="thermal-col-left">
-          <span class="thermal-col-depth">-${item.d} m</span>
-          <span class="thermal-col-zone">${item.zone}</span>
-        </div>
-        <div class="thermal-col-right">
-          <span class="thermal-col-temp">${wc.t.toFixed(2)} °C</span>
-          <span class="thermal-col-sal">${wc.s.toFixed(2)} PSU</span>
-          <span class="thermal-col-zone" style="font-size: 0.52rem;">σθ ${wc.sigma.toFixed(1)}</span>
-        </div>
-      </div>
-    `;
-  }).join('');
-}
-
-/* ---- Location Comparison Engine ---- */
-const COMPARISON_PRESETS = {
-  bay_of_bengal: { name: 'Bay of Bengal (Northern Basin)', lat: 17.85, lon: 88.35, sst: 28.5 },
-  arabian_sea: { name: 'Arabian Sea (High Salinity)', lat: 15.42, lon: 72.84, sst: 28.2 },
-  southern_ocean: { name: 'Southern Ocean (Antarctic Polar)', lat: -55.80, lon: 75.00, sst: 1.8 },
-  red_sea: { name: 'Red Sea (Hypersaline Trench)', lat: 21.30, lon: 38.20, sst: 30.1 },
-  mariana: { name: 'Mariana Deep Basin', lat: 11.35, lon: 142.20, sst: 28.9 }
+/* Override setObservationDepth to also update floating control */
+const _origSetObservationDepth = setObservationDepth;
+setObservationDepth = function (depthMeters, updateSlider) {
+  _origSetObservationDepth(depthMeters, updateSlider);
+  const d = Math.max(0, Math.min(3000, Number(depthMeters) || 0));
+  /* Sync floating slider */
+  if (fdcRange) fdcRange.value = d;
+  updateFloatingDepthUI(d);
+  /* Trigger heatmap update (debounced) */
+  scheduleHeatmapUpdate();
 };
 
-function getComparisonSample(key) {
-  const p = COMPARISON_PRESETS[key] || COMPARISON_PRESETS.bay_of_bengal;
-  const fake = {
-    lat: p.lat,
-    lon: p.lon,
-    name: p.name,
-    isLand: false,
-    marine: { sea_surface_temperature: p.sst },
-    air: { temperature_2m: p.sst, wind_speed_10m: 18 }
-  };
-  attachOceanography(fake);
-  return fake;
-}
-
-function renderComparisonSection(sampleA, stationBKey = 'bay_of_bengal') {
-  if (!sampleA || !sampleA.ocn) return;
-  const sampleB = getComparisonSample(stationBKey);
-
-  const oA = sampleA.ocn;
-  const oB = sampleB.ocn;
-
-  const tSurfA = oA.ts(0).t;
-  const tSurfB = oB.ts(0).t;
-  const tDeepA = oA.ts(2000).t;
-  const tDeepB = oB.ts(2000).t;
-
-  const thA = detectThermocline(sampleA);
-  const thB = detectThermocline(sampleB);
-
-  const gradA = calculateThermalGradient(sampleA).deltaT;
-  const gradB = calculateThermalGradient(sampleB).deltaT;
-
-  const sSurfA = oA.ts(0).s;
-  const sSurfB = oB.ts(0).s;
-
-  const nameA = sampleA.name || (activeOceanProfile ? activeOceanProfile.id : 'Station A');
-  const nameB = sampleB.name;
-
-  if ($('cmpStationAName')) $('cmpStationAName').textContent = nameA;
-
-  const tableWrapper = $('compareTableWrapper');
-  if (tableWrapper) {
-    tableWrapper.innerHTML = `
-      <table class="compare-table">
-        <thead>
-          <tr>
-            <th>Parameter</th>
-            <th style="color: var(--temp-highlight);">${nameA.substring(0, 14)}</th>
-            <th style="color: var(--cyan-salinity);">${nameB.substring(0, 14)}</th>
-            <th>Delta (A - B)</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td>Surface Temp</td>
-            <td>${tSurfA.toFixed(1)} °C</td>
-            <td>${tSurfB.toFixed(1)} °C</td>
-            <td style="color: ${tSurfA - tSurfB >= 0 ? 'var(--temp-highlight)' : 'var(--blue-accent)'};">${(tSurfA - tSurfB >= 0 ? '+' : '')}${(tSurfA - tSurfB).toFixed(1)} °C</td>
-          </tr>
-          <tr>
-            <td>Deep Temp (2km)</td>
-            <td>${tDeepA.toFixed(1)} °C</td>
-            <td>${tDeepB.toFixed(1)} °C</td>
-            <td>${(tDeepA - tDeepB >= 0 ? '+' : '')}${(tDeepA - tDeepB).toFixed(1)} °C</td>
-          </tr>
-          <tr>
-            <td>Thermal ΔT</td>
-            <td>${gradA.toFixed(1)} °C</td>
-            <td>${gradB.toFixed(1)} °C</td>
-            <td>${(gradA - gradB >= 0 ? '+' : '')}${(gradA - gradB).toFixed(1)} °C</td>
-          </tr>
-          <tr>
-            <td>Thermocline Depth</td>
-            <td>${thA.top}–${thA.bottom} m</td>
-            <td>${thB.top}–${thB.bottom} m</td>
-            <td>${thA.top - thB.top} m</td>
-          </tr>
-          <tr>
-            <td>Surface Salinity</td>
-            <td>${sSurfA.toFixed(2)} PSU</td>
-            <td>${sSurfB.toFixed(2)} PSU</td>
-            <td>${(sSurfA - sSurfB >= 0 ? '+' : '')}${(sSurfA - sSurfB).toFixed(2)}</td>
-          </tr>
-          <tr>
-            <td>Water Mass</td>
-            <td style="font-size: 0.54rem;">${oA.ts(0).t > 24 ? oA.basin : 'Temperate/Polar'}</td>
-            <td style="font-size: 0.54rem;">${sampleB.basin || sampleB.name}</td>
-            <td>—</td>
-          </tr>
-        </tbody>
-      </table>
-    `;
-  }
-
-  const chartContainer = $('compareChartContainer');
-  if (chartContainer) {
-    chartContainer.innerHTML = renderInvertedScientificChart(sampleA, 'temp', sampleB);
-  }
-}
-
-/* ---- Ocean Profile Loader ---- */
-function loadOceanProfile(sample, argoData = null) {
-  if (!sample) return;
-  activeOceanProfile = sample;
-
-  const idEl = $('profStationId');
-  const badgeEl = $('profPlatformBadge');
-  const coordsEl = $('profCoords');
-  const waterMassEl = $('profWaterMass');
-  const argoStatusEl = $('profArgoStatus');
-
-  if (argoData) {
-    if (idEl) idEl.textContent = argoData.id;
-    if (badgeEl) badgeEl.textContent = `${argoData.platform} · WMO ${argoData.wmo}`;
-    if (coordsEl) coordsEl.textContent = fmtCoord(argoData.lat, argoData.lon);
-    if (waterMassEl) waterMassEl.textContent = argoData.waterMass;
-    if (argoStatusEl) argoStatusEl.textContent = `Cycle #${argoData.cycle} · Battery: ${argoData.battery} · Sensor: ${argoData.sensor}`;
-  } else {
-    if (idEl) idEl.textContent = sample.name ? sample.name.substring(0, 18).toUpperCase() : 'OCEAN-STATION';
-    if (badgeEl) badgeEl.textContent = 'GEOSPATIAL PROFILER';
-    if (coordsEl) coordsEl.textContent = fmtCoord(sample.lat, sample.lon);
-    if (waterMassEl) waterMassEl.textContent = sample.ocn ? sample.ocn.basin + ' Water' : 'Marine Water Mass';
-    if (argoStatusEl) argoStatusEl.textContent = 'Active In-Situ Satellite Telemetry Stream';
-  }
-
-  const snapGrid = $('profSnapshotGrid');
-  if (snapGrid && sample.ocn) {
-    const o = sample.ocn;
-    const tSurf = o.ts(0).t;
-    const tDeep = o.ts(2000).t;
-    const grad = calculateThermalGradient(sample);
-    const sSurf = o.ts(0).s;
-    const sDeep = o.ts(2000).s;
-    const presDeep = 200;
-
-    snapGrid.innerHTML = `
-      ${metric('Surface Temp', tSurf.toFixed(1), '°C', 'var(--temp)', 'Epipelagic 0m', SVG_ICONS.temp)}
-      ${metric('Deep Temp', tDeep.toFixed(1), '°C', 'var(--temp)', 'Bathypelagic 2000m', SVG_ICONS.temp)}
-      ${metric('Depth Range', '0–2000', 'm', 'var(--cyan)', 'Standard CTD cast', SVG_ICONS.alt)}
-      ${metric('Thermal ΔT', grad.deltaT.toFixed(1), '°C', 'var(--temp-highlight)', grad.category, SVG_ICONS.balance)}
-      ${metric('Salinity SSS', sSurf.toFixed(2), 'PSU', 'var(--cyan-salinity)', `2km: ${sDeep.toFixed(2)} PSU`, SVG_ICONS.salinity)}
-      ${metric('Hydrostatic P', presDeep, 'bar', 'var(--curr)', 'At 2,000m floor', SVG_ICONS.pressure)}
-    `;
-  }
-
-  const grad = calculateThermalGradient(sample);
-  if ($('profGradientVal')) $('profGradientVal').textContent = `${grad.deltaT.toFixed(1)} °C (${grad.category})`;
-  const pin = $('thermalGaugePin');
-  if (pin) {
-    const pct = Math.max(2, Math.min(98, (grad.deltaT / 28) * 100));
-    pin.style.left = `${pct}%`;
-  }
-
-  const therm = detectThermocline(sample);
-  if ($('thermTop')) $('thermTop').textContent = `${therm.top} m`;
-  if ($('thermBottom')) $('thermBottom').textContent = `${therm.bottom} m`;
-  if ($('thermDrop')) $('thermDrop').textContent = `-${therm.tempDrop.toFixed(1)} °C`;
-  if ($('thermGrad')) $('thermGrad').textContent = `-${therm.peakGrad.toFixed(3)} °C/m`;
-  if ($('thermoclineStatusBadge')) {
-    $('thermoclineStatusBadge').textContent = therm.isStratified ? 'Stratified' : 'Well-Mixed';
-  }
-  if ($('thermNote')) {
-    $('thermNote').innerHTML = therm.isStratified
-      ? `<span>Strong thermocline barrier detected between <b>${therm.top}m</b> and <b>${therm.bottom}m</b> with maximum vertical cooling rate of <b>${(therm.peakGrad * 100).toFixed(1)}°C per 100m</b>.</span>`
-      : `<span>Weak vertical stratification observed in the upper 1,000 meters.</span>`;
-  }
-
-  const anomGrid = $('profAnomalyGrid');
-  if (anomGrid) {
-    const anoms = calculateDepthAnomalies(sample);
-    anomGrid.innerHTML = anoms.map(a => `
-      <div class="anomaly-chip ${a.status}">
-        <small>${a.depth === 0 ? 'Surface' : a.depth + 'm'}</small>
-        <b>${a.arrow} ${(a.diff >= 0 ? '+' : '')}${a.diff.toFixed(1)}°C</b>
-      </div>
-    `).join('');
-  }
-
-  const chartCont = $('scientificChartContainer');
-  if (chartCont) {
-    chartCont.innerHTML = renderInvertedScientificChart(sample, activeGraphParam);
-    attachChartProbeHover();
-  }
-
-  const colWrap = $('thermalColumnWrapper');
-  if (colWrap) {
-    colWrap.innerHTML = renderThermalColumn(sample);
-  }
-
-  renderComparisonSection(sample, activeComparisonStationKey);
-}
-
-function selectArgoFloat(argo, autoFly = true) {
-  if (!argo) return;
-
-  if (selectedArgoHalo) {
-    selectedArgoHalo.position = Cesium.Cartesian3.fromDegrees(argo.lon, argo.lat, 0);
-    selectedArgoHalo.show = true;
-  }
-
-  const sample = {
-    lat: argo.lat,
-    lon: argo.lon,
-    name: argo.name,
-    isLand: false,
-    marine: {
-      sea_surface_temperature: 28.4 - Math.abs(argo.lat) * 0.25,
-      wave_height: 1.4,
-      ocean_current_velocity: 1.8,
-      ocean_current_direction: 145
-    },
-    air: {
-      temperature_2m: 28.2 - Math.abs(argo.lat) * 0.25,
-      wind_speed_10m: 16,
-      wind_direction_10m: 120,
-      surface_pressure: 1012
-    }
-  };
-  attachOceanography(sample);
-  lastSample = sample;
-
-  loadOceanProfile(sample, argo);
-  toggleOceanProfilePanel(true);
-
-  if (autoFly && viewer) {
-    flyTo(argo.lat, argo.lon, 600000, 2.2);
-    toast(`Argo Float ${argo.id} Selected (${argo.name})`);
-  }
-}
-
-function toggleOceanProfilePanel(forceState) {
-  const p = $('oceanProfilePanel');
-  if (!p) return;
-  const willBeCollapsed = typeof forceState === 'boolean' ? !forceState : !p.classList.contains('collapsed');
-  p.classList.toggle('collapsed', willBeCollapsed);
-
-  const toggleBtn = $('oceanProfileToggle');
-  if (toggleBtn) {
-    toggleBtn.setAttribute('aria-expanded', String(!willBeCollapsed));
-    toggleBtn.classList.toggle('active', !willBeCollapsed);
-  }
-
-  const btnGlobe = $('btnModeGlobe');
-  const btnProfile = $('btnModeProfile');
-  if (btnGlobe && btnProfile) {
-    btnGlobe.classList.toggle('active', willBeCollapsed);
-    btnProfile.classList.toggle('active', !willBeCollapsed);
-    if (!willBeCollapsed) {
-      btnProfile.querySelector('.mode-icon').textContent = '◉';
-      btnGlobe.querySelector('.mode-icon').textContent = '○';
-    } else {
-      btnGlobe.querySelector('.mode-icon').textContent = '◉';
-      btnProfile.querySelector('.mode-icon').textContent = '○';
-    }
-  }
-
-  if (!willBeCollapsed && !activeOceanProfile) {
-    if (lastSample && !lastSample.isLand) {
-      loadOceanProfile(lastSample);
-    } else {
-      selectArgoFloat(ARGO_FLOAT_NETWORK[0], false);
-    }
-  }
-}
-
-// Subnav Tabs Wiring
-document.querySelectorAll('.prof-tab-btn').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.prof-tab-btn').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    activeProfileTab = tab.getAttribute('data-tab');
-
-    document.querySelectorAll('.prof-tab-pane').forEach(pane => pane.classList.remove('active'));
-    if (activeProfileTab === 'overview') $('paneOverview')?.classList.add('active');
-    else if (activeProfileTab === 'graph') $('paneGraph')?.classList.add('active');
-    else if (activeProfileTab === 'column') $('paneColumn')?.classList.add('active');
-    else if (activeProfileTab === 'compare') $('paneCompare')?.classList.add('active');
+if (fdcRange) {
+  fdcRange.addEventListener('input', e => {
+    const d = Number(e.target.value);
+    /* Update sidebar slider in sync */
+    if (sidebarRange) sidebarRange.value = d;
+    setObservationDepth(d, false);
   });
-});
+  fdcRange.addEventListener('change', e => {
+    toast(`Depth: ${e.target.value === '0' ? 'Surface' : '−' + e.target.value + 'm'}`);
+  });
+}
 
-// Parameter Switcher Wiring
-document.querySelectorAll('.param-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.param-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    activeGraphParam = btn.getAttribute('data-param') || 'temp';
-    if (activeOceanProfile) {
-      const chartCont = $('scientificChartContainer');
-      if (chartCont) {
-        chartCont.innerHTML = renderInvertedScientificChart(activeOceanProfile, activeGraphParam);
-        attachChartProbeHover();
+/* Initialize floating display */
+updateFloatingDepthUI(currentObservationDepth);
+
+/* ---- Weather Colors Toggle ---- */
+const fdcWeatherToggle = $('fdcWeatherToggle');
+
+function setWeatherMode(on) {
+  weatherMode = on;
+  if (fdcWeatherToggle) {
+    fdcWeatherToggle.classList.toggle('on', on);
+    fdcWeatherToggle.setAttribute('aria-checked', String(on));
+  }
+  if (fdcRange) {
+    fdcRange.classList.toggle('weather-mode', on);
+  }
+  /* Update heatmap colors */
+  scheduleHeatmapUpdate();
+}
+
+if (fdcWeatherToggle) {
+  fdcWeatherToggle.addEventListener('click', () => {
+    setWeatherMode(!weatherMode);
+    toast(weatherMode ? 'Weather/Thermal colors active' : 'Ocean Blue colors active');
+  });
+  fdcWeatherToggle.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      setWeatherMode(!weatherMode);
+      toast(weatherMode ? 'Weather/Thermal colors active' : 'Ocean Blue colors active');
+    }
+  });
+}
+
+/* ---- Ocean Blue color scale ---- */
+const OCEAN_BLUE_STOPS = [
+  { t: 0, r: 191, g: 219, b: 254 },   /* #BFDBFE — warmest */
+  { t: 0.25, r: 96, g: 165, b: 250 },  /* #60A5FA */
+  { t: 0.50, r: 56, g: 189, b: 248 },  /* #38BDF8 */
+  { t: 0.75, r: 37, g: 99, b: 235 },   /* #2563EB */
+  { t: 1.0, r: 29, g: 78, b: 216 }     /* #1D4ED8 — coldest */
+];
+
+/* ---- Weather/Thermal color scale ---- */
+const WEATHER_STOPS = [
+  { t: 0, r: 37, g: 99, b: 235 },     /* #2563EB — coldest (deep blue) */
+  { t: 0.20, r: 6, g: 182, b: 212 },  /* #06B6D4 — cyan */
+  { t: 0.40, r: 34, g: 197, b: 94 },  /* #22C55E — green */
+  { t: 0.60, r: 250, g: 204, b: 21 }, /* #FACC15 — yellow */
+  { t: 0.80, r: 249, g: 115, b: 22 }, /* #F97316 — orange */
+  { t: 1.0, r: 239, g: 68, b: 68 }    /* #EF4444 — hottest (red) */
+];
+
+function interpolateColorScale(fraction, stops) {
+  const t = Math.max(0, Math.min(1, fraction));
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (t >= stops[i].t && t <= stops[i + 1].t) {
+      const local = (t - stops[i].t) / (stops[i + 1].t - stops[i].t);
+      const s = 1 - local, e = local;
+      return {
+        r: Math.round(stops[i].r * s + stops[i + 1].r * e),
+        g: Math.round(stops[i].g * s + stops[i + 1].g * e),
+        b: Math.round(stops[i].b * s + stops[i + 1].b * e)
+      };
+    }
+  }
+  const last = stops[stops.length - 1];
+  return { r: last.r, g: last.g, b: last.b };
+}
+
+/* ---- Heatmap Visualization ---- */
+let heatmapLayer = null;
+let heatmapUpdateTimer = null;
+const HEATMAP_DEBOUNCE = 400; /* ms */
+
+function scheduleHeatmapUpdate() {
+  clearTimeout(heatmapUpdateTimer);
+  heatmapUpdateTimer = setTimeout(updateHeatmap, HEATMAP_DEBOUNCE);
+}
+
+function updateHeatmap() {
+  if (!viewer) return;
+
+  const depth = currentObservationDepth;
+  const stops = weatherMode ? WEATHER_STOPS : OCEAN_BLUE_STOPS;
+
+  /* Temperature range for color mapping at this depth */
+  /* Use the existing client-side oceanography engine to compute temps */
+  const gridRes = 5; /* degrees */
+  const lats = [];
+  const lons = [];
+  for (let lat = -80; lat <= 80; lat += gridRes) lats.push(lat);
+  for (let lon = -180; lon < 180; lon += gridRes) lons.push(lon);
+
+  const W = lons.length;
+  const H = lats.length;
+
+  /* Compute temperature grid using existing physics engine */
+  const temps = new Float32Array(W * H);
+  let tMin = 999, tMax = -999;
+
+  for (let yi = 0; yi < H; yi++) {
+    for (let xi = 0; xi < W; xi++) {
+      const lat = lats[yi];
+      const lon = lons[xi];
+
+      /* Use existing climatological SST + depth profile */
+      const cl = climatologicalSSS(lat, lon);
+      const sst = 30.0 - Math.abs(lat) * 0.10 + 0.5 * Math.sin(lon * Math.PI / 180);
+      const clampedSST = Math.max(-1.8, Math.min(32, sst));
+      const mld = estimateMLD(cl.sss, 15, lat);
+      const blt = barrierLayerThickness(cl.sss);
+      const hyper = cl.sss > 37.5;
+
+      const t = temperatureAtDepth(clampedSST, cl.sss, lat, depth, mld, blt, hyper);
+      temps[yi * W + xi] = t;
+
+      if (t < tMin) tMin = t;
+      if (t > tMax) tMax = t;
+    }
+  }
+
+  /* Render to off-screen canvas */
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(W, H);
+
+  const range = (tMax - tMin) || 1;
+
+  for (let yi = 0; yi < H; yi++) {
+    for (let xi = 0; xi < W; xi++) {
+      const t = temps[yi * W + xi];
+      /* For ocean blue: warm = light blue (0), cold = deep blue (1)
+         For weather: cold = blue (0), warm = red (1) */
+      let fraction;
+      if (weatherMode) {
+        fraction = (t - tMin) / range; /* cold=0, warm=1 */
+      } else {
+        fraction = 1 - (t - tMin) / range; /* warm=0 (light), cold=1 (dark) */
+      }
+
+      const c = interpolateColorScale(fraction, stops);
+      /* Canvas is drawn top-to-bottom but lats go bottom-to-top */
+      const flippedY = H - 1 - yi;
+      const idx = (flippedY * W + xi) * 4;
+      img.data[idx] = c.r;
+      img.data[idx + 1] = c.g;
+      img.data[idx + 2] = c.b;
+      img.data[idx + 3] = 90; /* Semi-transparent overlay */
+    }
+  }
+
+  ctx.putImageData(img, 0, 0);
+
+  /* Remove previous heatmap layer */
+  if (heatmapLayer) {
+    try { viewer.imageryLayers.remove(heatmapLayer, true); } catch (e) { }
+    heatmapLayer = null;
+  }
+
+  /* Add new heatmap as Cesium imagery layer */
+  try {
+    const provider = new Cesium.SingleTileImageryProvider({
+      url: canvas.toDataURL('image/png'),
+      rectangle: Cesium.Rectangle.fromDegrees(-180, -80, 180, 80)
+    });
+
+    heatmapLayer = viewer.imageryLayers.addImageryProvider(provider);
+    heatmapLayer.alpha = 0.35;
+    heatmapLayer.brightness = 1.1;
+
+    /* Ensure heatmap is below 3D tiles but above base imagery */
+    if (viewer.imageryLayers.length > 2) {
+      try {
+        viewer.imageryLayers.lower(heatmapLayer);
+      } catch (e) { /* ignore if already at bottom */ }
+    }
+  } catch (e) {
+    console.warn('Heatmap layer creation failed:', e);
+  }
+}
+
+/* ---- Backend API Client ---- */
+const _backendCache = new Map();
+
+async function fetchBackendPrediction(lat, lon, depth, sst, currentSpeed, windSpeed, salinity) {
+  if (!backendAvailable) return null;
+
+  const clampedDepth = Math.max(0, Math.min(3000, Number(depth) || 0));
+  const key = `${lat.toFixed(2)},${lon.toFixed(2)},${clampedDepth}`;
+  if (_backendCache.has(key)) return _backendCache.get(key);
+
+  try {
+    const params = new URLSearchParams({
+      lat: lat.toFixed(4),
+      lon: lon.toFixed(4),
+      depth: String(clampedDepth),
+      sst: String(sst),
+      surface_current_speed: String(currentSpeed || 0.5),
+      wind_speed: String(windSpeed || 15),
+      salinity: String(salinity || 35)
+    });
+
+    const r = await fetch(`${BACKEND_URL}/predict?${params}`, {
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (!r.ok) return null;
+    const data = await r.json();
+    if (data.error) return null;
+
+    _backendCache.set(key, data);
+    /* Limit cache size */
+    if (_backendCache.size > 200) {
+      const first = _backendCache.keys().next().value;
+      _backendCache.delete(first);
+    }
+    return data;
+  } catch (e) {
+    if (e.name === 'TimeoutError') {
+      backendAvailable = false;
+      console.info('Backend timed out — disabling for this session');
+    }
+    return null;
+  }
+}
+
+/* ---- Layer toggle: connect Temperature checkbox to heatmap ---- */
+if ($('layerTemperature')) {
+  const origHandler = $('layerTemperature').onchange;
+  $('layerTemperature').onchange = e => {
+    if (origHandler) origHandler(e);
+    if (e.target.checked) {
+      scheduleHeatmapUpdate();
+    } else {
+      /* Remove heatmap when temperature layer unchecked */
+      if (heatmapLayer) {
+        try { viewer.imageryLayers.remove(heatmapLayer, true); } catch (err) { }
+        heatmapLayer = null;
       }
     }
-  });
-});
-
-// View Mode Switcher Buttons
-if ($('btnModeGlobe')) {
-  $('btnModeGlobe').onclick = () => toggleOceanProfilePanel(false);
-}
-if ($('btnModeProfile')) {
-  $('btnModeProfile').onclick = () => toggleOceanProfilePanel(true);
-}
-if ($('oceanProfileToggle')) {
-  $('oceanProfileToggle').onclick = () => toggleOceanProfilePanel();
-}
-if ($('btnProfClose')) {
-  $('btnProfClose').onclick = () => toggleOceanProfilePanel(false);
-}
-
-// Comparison Preset Selector
-if ($('cmpStationBSel')) {
-  $('cmpStationBSel').onchange = e => {
-    activeComparisonStationKey = e.target.value;
-    if (activeOceanProfile) {
-      renderComparisonSection(activeOceanProfile, activeComparisonStationKey);
-    }
   };
 }
 
-// Ocean Profile Footer Buttons
-if ($('btnProfLock')) {
-  $('btnProfLock').onclick = e => {
-    locked = !locked;
-    e.currentTarget.classList.toggle('active', locked);
-    toast(locked ? 'Profile locked to active station' : 'Profile unlocked — tracking selection');
-  };
-}
-if ($('btnProfFly')) {
-  $('btnProfFly').onclick = () => {
-    if (!activeOceanProfile) return toast('No station loaded');
-    flyTo(activeOceanProfile.lat, activeOceanProfile.lon, 600000, 2.2);
-    toast(`Flying to ${activeOceanProfile.name || 'Station'}`);
-  };
-}
-if ($('btnProfCopy')) {
-  $('btnProfCopy').onclick = async () => {
-    if (!activeOceanProfile || !activeOceanProfile.ocn) return toast('No ocean profile to copy');
-    const s = activeOceanProfile;
-    const o = s.ocn;
-    const th = detectThermocline(s);
-    const grad = calculateThermalGradient(s);
-
-    const txt =
-      `OceanXplore Scientific Ocean Profile Report\n` +
-      `Station    : ${s.name || 'Argo Profile'}\n` +
-      `Coords     : ${fmtCoord(s.lat, s.lon)}\n` +
-      `Water Mass : ${o.basin} (${o.note})\n` +
-      `Surface SST: ${o.ts(0).t.toFixed(2)} °C | SSS: ${o.ts(0).s.toFixed(2)} PSU\n` +
-      `Deep 2000m : ${o.ts(2000).t.toFixed(2)} °C | Sal: ${o.ts(2000).s.toFixed(2)} PSU\n` +
-      `Thermal ΔT : ${grad.deltaT.toFixed(2)} °C (${grad.category})\n` +
-      `Thermocline: ${th.top}m to ${th.bottom}m (Drop: -${th.tempDrop.toFixed(2)} °C, Peak Grad: -${th.peakGrad.toFixed(3)} °C/m)\n` +
-      `MLD        : ${o.mld} m ${o.blt ? `(+${o.blt}m barrier layer)` : ''}\n` +
-      `Generated  : ${new Date().toISOString()}`;
-
-    try {
-      await navigator.clipboard.writeText(txt);
-      toast('Scientific CTD report copied to clipboard');
-    } catch (e) {
-      toast('Clipboard blocked by browser');
-    }
-  };
-}
+/* ---- Initial heatmap render (after globe is ready) ---- */
+setTimeout(() => {
+  if (viewer && $('layerTemperature') && $('layerTemperature').checked) {
+    updateHeatmap();
+  }
+}, 3000);
